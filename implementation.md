@@ -1,3 +1,30 @@
+sudo apt install python3-flask
+
+sudo python3 network_gui.py
+
+sudo nano /etc/systemd/system/pi-gateway.service
+
+[Unit]
+Description=Raspberry Pi Network Gateway GUI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/dominikkornak
+ExecStart=/usr/bin/python3 /home/dominikkornak/network_gui.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+
+sudo systemctl daemon-reload
+sudo systemctl enable pi-gateway
+sudo systemctl start pi-gateway
+
+
 ## Phase 1 — Base Linux System
 
 [ ] Install Linux on Raspberry Pi 3
