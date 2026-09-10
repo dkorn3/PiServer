@@ -2,7 +2,9 @@ import socket
 import subprocess
 import os
 
+
 ## Interface Discovery ##
+
 
 def get_interfaces():
     return [name for _, name in socket.if_nameindex()]
@@ -40,6 +42,7 @@ def get_interface_type(interface):
 
 ## Address Info ##
 
+
 def get_ip_addresses(interface):
     result = subprocess.run(
         ["ip", "addr", "show", interface],
@@ -64,7 +67,9 @@ def get_mac_address(interface):
     except FileNotFoundError:
         return None
 
+
 ## Routing ##
+
 
 def get_routes():
     result = subprocess.run(
@@ -89,7 +94,3 @@ def get_default_route():
 
     return None
     
-
-
-
-print(get_default_route())
