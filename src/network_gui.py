@@ -1,4 +1,5 @@
-from flask import Flask, request, redirect, url_for, render_template_string
+```python
+from flask import Flask, request, redirect, url_for, render_template_string, jsonify
 from datetime import datetime
 import monitoring
 
@@ -32,54 +33,26 @@ LOGS = []
 # ============================================================
 
 def configure_network():
-    """
-    Network configuration placeholder.
-
-    This will later connect to network.py.
-    """
     return True
 
 
 def configure_dhcp():
-    """
-    DHCP configuration placeholder.
-
-    This will later connect to dhcp.py.
-    """
     return True
 
 
 def configure_dns():
-    """
-    DNS configuration placeholder.
-
-    This will later connect to dns.py.
-    """
     return True
 
 
 def configure_firewall():
-    """
-    Firewall configuration placeholder.
-
-    This will later connect to firewall.py.
-    """
     return True
 
 
 def configure_vpn():
-    """
-    VPN configuration placeholder.
-
-    This will later connect to vpn.py.
-    """
     return True
 
 
 def update_monitoring():
-    """
-    Get real monitoring information from monitoring.py.
-    """
     return monitoring.get_gateway_health()
 
 
@@ -88,7 +61,10 @@ def update_monitoring():
 # ============================================================
 
 def add_log(message):
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    timestamp = datetime.now().strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
 
     LOGS.insert(
         0,
@@ -98,7 +74,6 @@ def add_log(message):
         }
     )
 
-    # Keep only the most recent 100 logs
     if len(LOGS) > 100:
         LOGS.pop()
 
@@ -167,7 +142,9 @@ def network():
 
         configure_network()
 
-        add_log("Network configuration updated.")
+        add_log(
+            "Network configuration updated."
+        )
 
         return redirect(url_for("network"))
 
@@ -336,6 +313,18 @@ def monitoring_page():
         logs=LOGS,
         health=health
     )
+
+
+# ============================================================
+# Monitoring API
+# ============================================================
+
+@app.route("/api/monitoring")
+def monitoring_api():
+
+    health = update_monitoring()
+
+    return jsonify(health)
 
 
 # ============================================================
@@ -568,19 +557,16 @@ HTML = """
 
 
         .green {
-
             color: #16a34a;
         }
 
 
         .yellow {
-
             color: #ca8a04;
         }
 
 
         .red {
-
             color: #dc2626;
         }
 
@@ -611,7 +597,6 @@ HTML = """
 
 
         .form-group {
-
             margin-bottom: 18px;
         }
 
@@ -673,7 +658,6 @@ HTML = """
 
 
         .button:hover {
-
             background: #374151;
         }
 
@@ -693,7 +677,6 @@ HTML = """
 
 
         .toggle-row:last-child {
-
             border-bottom: none;
         }
 
@@ -756,13 +739,11 @@ HTML = """
 
 
         .toggle-switch input:checked + .slider {
-
             background: #22c55e;
         }
 
 
         .toggle-switch input:checked + .slider:before {
-
             transform: translateX(22px);
         }
 
@@ -790,7 +771,6 @@ HTML = """
 
 
         .log-message {
-
             font-size: 14px;
         }
 
@@ -1007,7 +987,10 @@ HTML = """
                         CPU Usage
                     </div>
 
-                    <div class="card-value">
+                    <div
+                        class="card-value"
+                        id="dashboard-cpu-usage"
+                    >
 
                         {% if health.system.cpu_usage is not none %}
                             {{ "%.1f"|format(health.system.cpu_usage) }}%
@@ -1026,7 +1009,10 @@ HTML = """
                         Memory
                     </div>
 
-                    <div class="card-value">
+                    <div
+                        class="card-value"
+                        id="dashboard-memory-usage"
+                    >
 
                         {% if health.system.memory_usage is not none %}
                             {{ "%.1f"|format(health.system.memory_usage) }}%
@@ -1045,7 +1031,10 @@ HTML = """
                         Temperature
                     </div>
 
-                    <div class="card-value">
+                    <div
+                        class="card-value"
+                        id="dashboard-temperature"
+                    >
 
                         {% if health.system.temperature is not none %}
                             {{ "%.1f"|format(health.system.temperature) }} °C
@@ -1064,7 +1053,10 @@ HTML = """
                         TCP Connections
                     </div>
 
-                    <div class="card-value">
+                    <div
+                        class="card-value"
+                        id="dashboard-connections"
+                    >
 
                         {% if health.connections is not none %}
                             {{ health.connections }}
@@ -1096,7 +1088,10 @@ HTML = """
                             SSH
                         </div>
 
-                        <div class="info-value">
+                        <div
+                            class="info-value"
+                            id="dashboard-ssh-status"
+                        >
 
                             {% if health.services.ssh == "active" %}
 
@@ -1123,7 +1118,10 @@ HTML = """
                             WireGuard
                         </div>
 
-                        <div class="info-value">
+                        <div
+                            class="info-value"
+                            id="dashboard-wireguard-status"
+                        >
 
                             {% if health.services.wireguard == "active" %}
 
@@ -1135,87 +1133,6 @@ HTML = """
 
                                 <span class="yellow">
                                     {{ health.services.wireguard }}
-                                </span>
-
-                            {% endif %}
-
-                        </div>
-
-                    </div>
-
-
-                    <div class="info-item">
-
-                        <div class="info-label">
-                            DNS
-                        </div>
-
-                        <div class="info-value">
-
-                            {% if health.dns.status == "active" %}
-
-                                <span class="green">
-                                    Active
-                                </span>
-
-                            {% else %}
-
-                                <span class="yellow">
-                                    {{ health.dns.status }}
-                                </span>
-
-                            {% endif %}
-
-                        </div>
-
-                    </div>
-
-
-                    <div class="info-item">
-
-                        <div class="info-label">
-                            DHCP
-                        </div>
-
-                        <div class="info-value">
-
-                            {% if health.dhcp.status == "active" %}
-
-                                <span class="green">
-                                    Active
-                                </span>
-
-                            {% else %}
-
-                                <span class="yellow">
-                                    {{ health.dhcp.status }}
-                                </span>
-
-                            {% endif %}
-
-                        </div>
-
-                    </div>
-
-
-                    <div class="info-item">
-
-                        <div class="info-label">
-                            Firewall
-                        </div>
-
-                        <div class="info-value">
-
-                            {% if health.firewall.status == "active" %}
-
-                                <span class="green">
-                                    Active
-                                </span>
-
-                            {% else %}
-
-                                <span class="yellow">
-                                    {{ health.firewall.status }}
                                 </span>
 
                             {% endif %}
@@ -1669,7 +1586,10 @@ HTML = """
                         CPU Usage
                     </div>
 
-                    <div class="card-value">
+                    <div
+                        class="card-value"
+                        id="cpu-usage"
+                    >
 
                         {% if health.system.cpu_usage is not none %}
                             {{ "%.1f"|format(health.system.cpu_usage) }}%
@@ -1688,7 +1608,10 @@ HTML = """
                         Memory
                     </div>
 
-                    <div class="card-value">
+                    <div
+                        class="card-value"
+                        id="memory-usage"
+                    >
 
                         {% if health.system.memory_usage is not none %}
                             {{ "%.1f"|format(health.system.memory_usage) }}%
@@ -1707,7 +1630,10 @@ HTML = """
                         Storage
                     </div>
 
-                    <div class="card-value">
+                    <div
+                        class="card-value"
+                        id="storage-usage"
+                    >
 
                         {% if health.system.storage_usage is not none %}
                             {{ "%.1f"|format(health.system.storage_usage) }}%
@@ -1726,7 +1652,10 @@ HTML = """
                         Temperature
                     </div>
 
-                    <div class="card-value">
+                    <div
+                        class="card-value"
+                        id="temperature"
+                    >
 
                         {% if health.system.temperature is not none %}
                             {{ "%.1f"|format(health.system.temperature) }} °C
@@ -1751,7 +1680,10 @@ HTML = """
                         TCP Connections
                     </div>
 
-                    <div class="card-value">
+                    <div
+                        class="card-value"
+                        id="connections"
+                    >
 
                         {% if health.connections is not none %}
                             {{ health.connections }}
@@ -1770,21 +1702,12 @@ HTML = """
                         VPN
                     </div>
 
-                    <div class="card-value">
+                    <div
+                        class="card-value"
+                        id="vpn-status"
+                    >
 
-                        {% if health.vpn.status == "active" %}
-
-                            <span class="green">
-                                Active
-                            </span>
-
-                        {% else %}
-
-                            <span class="yellow">
-                                {{ health.vpn.status }}
-                            </span>
-
-                        {% endif %}
+                        {{ health.vpn.status }}
 
                     </div>
 
@@ -1797,20 +1720,15 @@ HTML = """
                         DNS
                     </div>
 
-                    <div class="card-value">
+                    <div
+                        class="card-value"
+                        id="dns-status"
+                    >
 
-                        {% if health.dns.status == "active" %}
-
-                            <span class="green">
-                                Active
-                            </span>
-
+                        {% if health.dns %}
+                            {{ health.dns.status }}
                         {% else %}
-
-                            <span class="yellow">
-                                {{ health.dns.status }}
-                            </span>
-
+                            unknown
                         {% endif %}
 
                     </div>
@@ -1824,20 +1742,15 @@ HTML = """
                         DHCP
                     </div>
 
-                    <div class="card-value">
+                    <div
+                        class="card-value"
+                        id="dhcp-status"
+                    >
 
-                        {% if health.dhcp.status == "active" %}
-
-                            <span class="green">
-                                Active
-                            </span>
-
+                        {% if health.dhcp %}
+                            {{ health.dhcp.status }}
                         {% else %}
-
-                            <span class="yellow">
-                                {{ health.dhcp.status }}
-                            </span>
-
+                            unknown
                         {% endif %}
 
                     </div>
@@ -1864,7 +1777,10 @@ HTML = """
                             SSH
                         </div>
 
-                        <div class="info-value">
+                        <div
+                            class="info-value"
+                            id="ssh-status"
+                        >
 
                             {{ health.services.ssh }}
 
@@ -1879,7 +1795,10 @@ HTML = """
                             WireGuard
                         </div>
 
-                        <div class="info-value">
+                        <div
+                            class="info-value"
+                            id="wireguard-status"
+                        >
 
                             {{ health.services.wireguard }}
 
@@ -1894,7 +1813,10 @@ HTML = """
                             System Uptime
                         </div>
 
-                        <div class="info-value">
+                        <div
+                            class="info-value"
+                            id="uptime"
+                        >
 
                             {% if health.system.uptime is not none %}
 
@@ -1968,6 +1890,268 @@ HTML = """
     </div>
 
 
+    <!-- ===================================================== -->
+    <!-- LIVE MONITORING JAVASCRIPT -->
+    <!-- ===================================================== -->
+
+    {% if page == "monitoring" %}
+
+    <script>
+
+        async function updateMonitoring() {
+
+            try {
+
+                const response = await fetch(
+                    "/api/monitoring",
+                    {
+                        cache: "no-store"
+                    }
+                );
+
+
+                if (!response.ok) {
+
+                    throw new Error(
+                        "HTTP " + response.status
+                    );
+
+                }
+
+
+                const health =
+                    await response.json();
+
+
+                // CPU
+
+                if (
+                    health.system.cpu_usage !== null
+                    &&
+                    document.getElementById(
+                        "cpu-usage"
+                    )
+                ) {
+
+                    document.getElementById(
+                        "cpu-usage"
+                    ).textContent =
+                        health.system.cpu_usage.toFixed(1)
+                        + "%";
+
+                }
+
+
+                // Memory
+
+                if (
+                    health.system.memory_usage !== null
+                    &&
+                    document.getElementById(
+                        "memory-usage"
+                    )
+                ) {
+
+                    document.getElementById(
+                        "memory-usage"
+                    ).textContent =
+                        health.system.memory_usage.toFixed(1)
+                        + "%";
+
+                }
+
+
+                // Storage
+
+                if (
+                    health.system.storage_usage !== null
+                    &&
+                    document.getElementById(
+                        "storage-usage"
+                    )
+                ) {
+
+                    document.getElementById(
+                        "storage-usage"
+                    ).textContent =
+                        health.system.storage_usage.toFixed(1)
+                        + "%";
+
+                }
+
+
+                // Temperature
+
+                if (
+                    health.system.temperature !== null
+                    &&
+                    document.getElementById(
+                        "temperature"
+                    )
+                ) {
+
+                    document.getElementById(
+                        "temperature"
+                    ).textContent =
+                        health.system.temperature.toFixed(1)
+                        + " °C";
+
+                }
+
+
+                // TCP connections
+
+                if (
+                    health.connections !== null
+                    &&
+                    document.getElementById(
+                        "connections"
+                    )
+                ) {
+
+                    document.getElementById(
+                        "connections"
+                    ).textContent =
+                        health.connections;
+
+                }
+
+
+                // VPN
+
+                if (
+                    document.getElementById(
+                        "vpn-status"
+                    )
+                ) {
+
+                    document.getElementById(
+                        "vpn-status"
+                    ).textContent =
+                        health.vpn.status;
+
+                }
+
+
+                // DNS
+
+                if (
+                    document.getElementById(
+                        "dns-status"
+                    )
+                ) {
+
+                    document.getElementById(
+                        "dns-status"
+                    ).textContent =
+                        health.dns
+                            ? health.dns.status
+                            : "unknown";
+
+                }
+
+
+                // DHCP
+
+                if (
+                    document.getElementById(
+                        "dhcp-status"
+                    )
+                ) {
+
+                    document.getElementById(
+                        "dhcp-status"
+                    ).textContent =
+                        health.dhcp
+                            ? health.dhcp.status
+                            : "unknown";
+
+                }
+
+
+                // SSH
+
+                if (
+                    document.getElementById(
+                        "ssh-status"
+                    )
+                ) {
+
+                    document.getElementById(
+                        "ssh-status"
+                    ).textContent =
+                        health.services.ssh;
+
+                }
+
+
+                // WireGuard
+
+                if (
+                    document.getElementById(
+                        "wireguard-status"
+                    )
+                ) {
+
+                    document.getElementById(
+                        "wireguard-status"
+                    ).textContent =
+                        health.services.wireguard;
+
+                }
+
+
+                // Uptime
+
+                if (
+                    health.system.uptime !== null
+                    &&
+                    document.getElementById(
+                        "uptime"
+                    )
+                ) {
+
+                    document.getElementById(
+                        "uptime"
+                    ).textContent =
+                        Math.round(
+                            health.system.uptime
+                        )
+                        + " seconds";
+
+                }
+
+            }
+
+            catch (error) {
+
+                console.error(
+                    "Monitoring update failed:",
+                    error
+                );
+
+            }
+
+        }
+
+
+        // Run immediately
+
+        updateMonitoring();
+
+
+        // Update every 2 seconds
+
+        setInterval(
+            updateMonitoring,
+            2000
+        );
+
+    </script>
+
+    {% endif %}
+
+
 </body>
 
 </html>
@@ -1981,20 +2165,37 @@ HTML = """
 
 def main():
 
-    print("===================================")
-    print("PiServer Network Gateway")
-    print("===================================")
-    print("Starting web interface...")
-    print("Listening on port 80...")
+    print(
+        "==================================="
+    )
+
+    print(
+        "PiServer Network Gateway"
+    )
+
+    print(
+        "==================================="
+    )
+
+    print(
+        "Starting web interface..."
+    )
+
+    print(
+        "Listening on port 80..."
+    )
+
     print("")
 
 
     app.run(
         host="0.0.0.0",
         port=80,
-        debug=False
+        debug=False,
+        threaded=True
     )
 
 
 if __name__ == "__main__":
     main()
+```
