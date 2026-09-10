@@ -1,3 +1,4 @@
+```python
 from flask import Flask, request, redirect, url_for, render_template_string, jsonify
 from datetime import datetime
 import monitoring
@@ -1893,11 +1894,9 @@ HTML = """
     <!-- LIVE MONITORING JAVASCRIPT -->
     <!-- ===================================================== -->
 
-    {% if page == "monitoring" %}
-
     <script>
 
-        async function updateMonitoring() {
+        async function updatePage() {
 
             try {
 
@@ -1922,197 +1921,297 @@ HTML = """
                     await response.json();
 
 
-                // CPU
+                // =================================================
+                // DASHBOARD
+                // =================================================
+
+                const dashboardCPU =
+                    document.getElementById(
+                        "dashboard-cpu-usage"
+                    );
 
                 if (
+                    dashboardCPU &&
                     health.system.cpu_usage !== null
-                    &&
-                    document.getElementById(
-                        "cpu-usage"
-                    )
                 ) {
 
-                    document.getElementById(
-                        "cpu-usage"
-                    ).textContent =
+                    dashboardCPU.textContent =
                         health.system.cpu_usage.toFixed(1)
                         + "%";
 
                 }
 
 
-                // Memory
+                const dashboardMemory =
+                    document.getElementById(
+                        "dashboard-memory-usage"
+                    );
 
                 if (
+                    dashboardMemory &&
                     health.system.memory_usage !== null
-                    &&
-                    document.getElementById(
-                        "memory-usage"
-                    )
                 ) {
 
-                    document.getElementById(
-                        "memory-usage"
-                    ).textContent =
+                    dashboardMemory.textContent =
                         health.system.memory_usage.toFixed(1)
                         + "%";
 
                 }
 
 
-                // Storage
+                const dashboardTemperature =
+                    document.getElementById(
+                        "dashboard-temperature"
+                    );
 
                 if (
-                    health.system.storage_usage !== null
-                    &&
-                    document.getElementById(
-                        "storage-usage"
-                    )
-                ) {
-
-                    document.getElementById(
-                        "storage-usage"
-                    ).textContent =
-                        health.system.storage_usage.toFixed(1)
-                        + "%";
-
-                }
-
-
-                // Temperature
-
-                if (
+                    dashboardTemperature &&
                     health.system.temperature !== null
-                    &&
-                    document.getElementById(
-                        "temperature"
-                    )
                 ) {
 
-                    document.getElementById(
-                        "temperature"
-                    ).textContent =
+                    dashboardTemperature.textContent =
                         health.system.temperature.toFixed(1)
                         + " °C";
 
                 }
 
 
-                // TCP connections
+                const dashboardConnections =
+                    document.getElementById(
+                        "dashboard-connections"
+                    );
 
                 if (
+                    dashboardConnections &&
                     health.connections !== null
-                    &&
-                    document.getElementById(
-                        "connections"
-                    )
                 ) {
 
-                    document.getElementById(
-                        "connections"
-                    ).textContent =
+                    dashboardConnections.textContent =
                         health.connections;
 
                 }
 
 
-                // VPN
+                const dashboardSSH =
+                    document.getElementById(
+                        "dashboard-ssh-status"
+                    );
+
+                if (dashboardSSH) {
+
+                    if (
+                        health.services.ssh === "active"
+                    ) {
+
+                        dashboardSSH.innerHTML =
+                            '<span class="green">Active</span>';
+
+                    } else {
+
+                        dashboardSSH.innerHTML =
+                            '<span class="red">'
+                            + health.services.ssh
+                            + '</span>';
+
+                    }
+
+                }
+
+
+                const dashboardWireGuard =
+                    document.getElementById(
+                        "dashboard-wireguard-status"
+                    );
+
+                if (dashboardWireGuard) {
+
+                    if (
+                        health.services.wireguard === "active"
+                    ) {
+
+                        dashboardWireGuard.innerHTML =
+                            '<span class="green">Active</span>';
+
+                    } else {
+
+                        dashboardWireGuard.innerHTML =
+                            '<span class="yellow">'
+                            + health.services.wireguard
+                            + '</span>';
+
+                    }
+
+                }
+
+
+                // =================================================
+                // MONITORING PAGE
+                // =================================================
+
+                const cpu =
+                    document.getElementById(
+                        "cpu-usage"
+                    );
 
                 if (
-                    document.getElementById(
-                        "vpn-status"
-                    )
+                    cpu &&
+                    health.system.cpu_usage !== null
                 ) {
 
+                    cpu.textContent =
+                        health.system.cpu_usage.toFixed(1)
+                        + "%";
+
+                }
+
+
+                const memory =
+                    document.getElementById(
+                        "memory-usage"
+                    );
+
+                if (
+                    memory &&
+                    health.system.memory_usage !== null
+                ) {
+
+                    memory.textContent =
+                        health.system.memory_usage.toFixed(1)
+                        + "%";
+
+                }
+
+
+                const storage =
+                    document.getElementById(
+                        "storage-usage"
+                    );
+
+                if (
+                    storage &&
+                    health.system.storage_usage !== null
+                ) {
+
+                    storage.textContent =
+                        health.system.storage_usage.toFixed(1)
+                        + "%";
+
+                }
+
+
+                const temperature =
+                    document.getElementById(
+                        "temperature"
+                    );
+
+                if (
+                    temperature &&
+                    health.system.temperature !== null
+                ) {
+
+                    temperature.textContent =
+                        health.system.temperature.toFixed(1)
+                        + " °C";
+
+                }
+
+
+                const connections =
+                    document.getElementById(
+                        "connections"
+                    );
+
+                if (
+                    connections &&
+                    health.connections !== null
+                ) {
+
+                    connections.textContent =
+                        health.connections;
+
+                }
+
+
+                const vpn =
                     document.getElementById(
                         "vpn-status"
-                    ).textContent =
+                    );
+
+                if (vpn) {
+
+                    vpn.textContent =
                         health.vpn.status;
 
                 }
 
 
-                // DNS
-
-                if (
+                const dns =
                     document.getElementById(
                         "dns-status"
-                    )
-                ) {
+                    );
 
-                    document.getElementById(
-                        "dns-status"
-                    ).textContent =
+                if (dns) {
+
+                    dns.textContent =
                         health.dns
-                            ? health.dns.status
-                            : "unknown";
+                        ? health.dns.status
+                        : "unknown";
 
                 }
 
 
-                // DHCP
-
-                if (
+                const dhcp =
                     document.getElementById(
                         "dhcp-status"
-                    )
-                ) {
+                    );
 
-                    document.getElementById(
-                        "dhcp-status"
-                    ).textContent =
+                if (dhcp) {
+
+                    dhcp.textContent =
                         health.dhcp
-                            ? health.dhcp.status
-                            : "unknown";
+                        ? health.dhcp.status
+                        : "unknown";
 
                 }
 
 
-                // SSH
-
-                if (
+                const ssh =
                     document.getElementById(
                         "ssh-status"
-                    )
-                ) {
+                    );
 
-                    document.getElementById(
-                        "ssh-status"
-                    ).textContent =
+                if (ssh) {
+
+                    ssh.textContent =
                         health.services.ssh;
 
                 }
 
 
-                // WireGuard
-
-                if (
+                const wireguard =
                     document.getElementById(
                         "wireguard-status"
-                    )
-                ) {
+                    );
 
-                    document.getElementById(
-                        "wireguard-status"
-                    ).textContent =
+                if (wireguard) {
+
+                    wireguard.textContent =
                         health.services.wireguard;
 
                 }
 
 
-                // Uptime
+                const uptime =
+                    document.getElementById(
+                        "uptime"
+                    );
 
                 if (
+                    uptime &&
                     health.system.uptime !== null
-                    &&
-                    document.getElementById(
-                        "uptime"
-                    )
                 ) {
 
-                    document.getElementById(
-                        "uptime"
-                    ).textContent =
+                    uptime.textContent =
                         Math.round(
                             health.system.uptime
                         )
@@ -2125,7 +2224,7 @@ HTML = """
             catch (error) {
 
                 console.error(
-                    "Monitoring update failed:",
+                    "PiServer monitoring update failed:",
                     error
                 );
 
@@ -2134,21 +2233,23 @@ HTML = """
         }
 
 
-        // Run immediately
+        // =================================================
+        // Initial update
+        // =================================================
 
-        updateMonitoring();
+        updatePage();
 
 
-        // Update every 2 seconds
+        // =================================================
+        // Update every 1 second
+        // =================================================
 
         setInterval(
-            updateMonitoring,
-            2000
+            updatePage,
+            1000
         );
 
     </script>
-
-    {% endif %}
 
 
 </body>
@@ -2197,3 +2298,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+```
