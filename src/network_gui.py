@@ -1,4 +1,4 @@
-```python
+
 from flask import Flask, request, redirect, url_for, render_template_string, jsonify
 from datetime import datetime
 import monitoring
@@ -2298,4 +2298,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
+
