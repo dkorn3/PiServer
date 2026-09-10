@@ -1,6 +1,5 @@
 sudo apt install python3-flask
-
-sudo python3 network_gui.py
+sudo apt install python3-psutil -y
 
 sudo nano /etc/systemd/system/pi-gateway.service
 
