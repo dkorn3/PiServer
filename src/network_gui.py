@@ -182,6 +182,20 @@ def update_monitoring():
     return monitoring.get_gateway_health()
 
 
+def update_network_status():
+    """Return the live Linux network state for the Network page."""
+    try:
+        return network_backend.get_network_status()
+    except Exception as exc:
+        return {
+            "interfaces": {},
+            "default_route": None,
+            "ipv4_forwarding": None,
+            "routes": [],
+            "error": str(exc),
+        }
+
+
 # ============================================================
 # Logging
 # ============================================================
@@ -279,12 +293,15 @@ def network():
 
         return redirect(url_for("network"))
 
+    network_status = update_network_status()
+
     return render_template_string(
         HTML,
         page="network",
         config=CONFIG,
         logs=LOGS,
-        health=None
+        health=None,
+        network_status=network_status
     )
 
 
@@ -1439,7 +1456,221 @@ HTML = """
                 </form>
 
             </div>
+            <div class="section">
 
+                <h2>
+                    Live Network Status
+                </h2>
+
+                {% if network_status.error %}
+
+                    <div class="info-item">
+                        <div class="info-label">
+                            Error
+                        </div>
+
+                        <div class="info-value red">
+                            {{ network_status.error }}
+                        </div>
+                    </div>
+
+                {% else %}
+
+                    <div class="cards">
+
+                        <div class="card">
+
+                            <div class="card-title">
+                                Default Route
+                            </div>
+
+                            <div class="card-value">
+                                {{ network_status.default_route or "--" }}
+                            </div>
+
+                        </div>
+
+
+                        <div class="card">
+
+                            <div class="card-title">
+                                IPv4 Forwarding
+                            </div>
+
+                            <div class="card-value">
+
+                                {% if network_status.ipv4_forwarding %}
+                                    <span class="green">
+                                        Enabled
+                                    </span>
+                                {% elif network_status.ipv4_forwarding is false %}
+                                    <span class="yellow">
+                                        Disabled
+                                    </span>
+                                {% else %}
+                                    <span class="red">
+                                        Unknown
+                                    </span>
+                                {% endif %}
+
+                            </div>
+
+                        </div>
+
+
+                        <div class="card">
+
+                            <div class="card-title">
+                                Interfaces
+                            </div>
+
+                            <div class="card-value">
+                                {{ network_status.interfaces|length }}
+                            </div>
+
+                        </div>
+
+                    </div>
+
+
+                    <div class="section">
+
+                        <h2>
+                            Interfaces
+                        </h2>
+
+                        <div style="overflow-x: auto;">
+
+                            <table style="
+                                width: 100%;
+                                border-collapse: collapse;
+                                font-size: 14px;
+                            ">
+
+                                <thead>
+
+                                    <tr>
+                                        <th style="text-align: left; padding: 10px;">
+                                            Name
+                                        </th>
+
+                                        <th style="text-align: left; padding: 10px;">
+                                            Type
+                                        </th>
+
+                                        <th style="text-align: left; padding: 10px;">
+                                            Status
+                                        </th>
+
+                                        <th style="text-align: left; padding: 10px;">
+                                            MAC
+                                        </th>
+
+                                        <th style="text-align: left; padding: 10px;">
+                                            Addresses
+                                        </th>
+                                    </tr>
+
+                                </thead>
+
+                                <tbody>
+
+                                    {% for name, interface in network_status.interfaces.items() %}
+
+                                        <tr>
+
+                                            <td style="padding: 10px;">
+                                                {{ name }}
+                                            </td>
+
+                                            <td style="padding: 10px;">
+                                                {{ interface.type or "--" }}
+                                            </td>
+
+                                            <td style="padding: 10px;">
+
+                                                {% if interface.status == "up" %}
+
+                                                    <span class="green">
+                                                        UP
+                                                    </span>
+
+                                                {% elif interface.status == "down" %}
+
+                                                    <span class="red">
+                                                        DOWN
+                                                    </span>
+
+                                                {% else %}
+
+                                                    <span class="yellow">
+                                                        {{ interface.status or "UNKNOWN" }}
+                                                    </span>
+
+                                                {% endif %}
+
+                                            </td>
+
+                                            <td style="padding: 10px;">
+                                                {{ interface.mac or "--" }}
+                                            </td>
+
+                                            <td style="padding: 10px;">
+
+                                                {% if interface.addresses %}
+
+                                                    {{ interface.addresses|join(", ") }}
+
+                                                {% else %}
+
+                                                    --
+
+                                                {% endif %}
+
+                                            </td>
+
+                                        </tr>
+
+                                    {% endfor %}
+
+                                </tbody>
+
+                            </table>
+
+                        </div>
+
+                    </div>
+
+
+                    <div class="section">
+
+                        <h2>
+                            Routing Table
+                        </h2>
+
+                        {% if network_status.routes %}
+
+                            {% for route in network_status.routes %}
+
+                                <div class="info-item" style="margin-bottom: 8px;">
+                                    {{ route }}
+                                </div>
+
+                            {% endfor %}
+
+                        {% else %}
+
+                            <div class="info-label">
+                                No routes found.
+                            </div>
+
+                        {% endif %}
+
+                    </div>
+
+                {% endif %}
+
+            </div>
 
         <!-- ================================================= -->
         <!-- DHCP -->
