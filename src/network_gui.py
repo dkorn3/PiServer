@@ -1,4 +1,4 @@
-
+import gateway_logger as gateway_logging
 from flask import Flask, request, redirect, url_for, render_template_string, jsonify
 from datetime import datetime
 import monitoring
