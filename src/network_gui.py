@@ -1,7 +1,13 @@
-import gateway_logger as gateway_logging
+
 from flask import Flask, request, redirect, url_for, render_template_string, jsonify
 from datetime import datetime
+import config as gateway_config
+import network as network_backend
+import dns as dns_backend
+import dhcp as dhcp_backend
+import firewall as firewall_backend
 import monitoring
+import gateway_logger as gateway_logging
 
 app = Flask(__name__)
 
@@ -10,18 +16,38 @@ app = Flask(__name__)
 # Temporary configuration storage
 # ============================================================
 
+try:
+    _BOOT_CONFIG = gateway_config.load_config()
+    _BOOT_NETWORK = _BOOT_CONFIG["network"]
+    _BOOT_DNS = _BOOT_CONFIG["dns"]
+    _BOOT_DHCP = _BOOT_CONFIG["dhcp"]
+    _BOOT_FIREWALL = _BOOT_CONFIG["firewall"]
+    _BOOT_VPN = _BOOT_CONFIG["vpn"]
+except Exception:
+    _BOOT_CONFIG = {}
+    _BOOT_NETWORK = {}
+    _BOOT_DNS = {}
+    _BOOT_DHCP = {}
+    _BOOT_FIREWALL = {}
+    _BOOT_VPN = {}
+
+
 CONFIG = {
-    "hostname": "DomPi",
-    "interface": "wlan0",
+    "hostname": _BOOT_CONFIG.get("hostname", "DomPi"),
+    "interface": _BOOT_NETWORK.get("wan_interface", "wlan0"),
     "mode": "gateway",
-    "ip_address": "",
+    "ip_address": _BOOT_NETWORK.get("lan_address", "").split("/")[0],
     "gateway": "",
     "netmask": "255.255.255.0",
-    "dns": "",
-    "dhcp_enabled": True,
-    "dns_enabled": True,
-    "firewall_enabled": True,
-    "vpn_enabled": False,
+    "dns": (
+        _BOOT_DNS.get("upstream_servers", ["1.1.1.1"])[0]
+        if _BOOT_DNS
+        else "1.1.1.1"
+    ),
+    "dhcp_enabled": _BOOT_DHCP.get("enabled", True),
+    "dns_enabled": _BOOT_DNS.get("enabled", True),
+    "firewall_enabled": _BOOT_FIREWALL.get("enabled", True),
+    "vpn_enabled": _BOOT_VPN.get("enabled", False),
 }
 
 
@@ -32,23 +58,123 @@ LOGS = []
 # Configuration functions
 # ============================================================
 
+def _current_backend_config():
+    """Translate the GUI's temporary CONFIG format into gateway config."""
+    cfg = gateway_config.load_config()
+
+    cfg["hostname"] = CONFIG["hostname"]
+
+    cfg["network"]["wan_interface"] = CONFIG["interface"]
+    cfg["network"]["lan_interface"] = cfg["network"].get(
+        "lan_interface",
+        "eth1"
+    )
+
+    if CONFIG["ip_address"]:
+        cfg["network"]["lan_address"] = (
+            f'{CONFIG["ip_address"]}/{CONFIG["netmask"]}'
+        )
+
+    return cfg
+
+
 def configure_network():
+    cfg = _current_backend_config()
+
+    gateway_config.save_config(cfg)
+    gateway_logging.log_info("Network configuration updated.")
+
     return True
 
 
 def configure_dhcp():
-    return True
+    cfg = _current_backend_config()
+
+    dhcp_cfg = dict(cfg["dhcp"])
+    dhcp_cfg["interface"] = cfg["network"]["lan_interface"]
+    dhcp_cfg["address"] = cfg["network"]["lan_address"].split("/")[0]
+
+    if CONFIG["dhcp_enabled"]:
+        success = dhcp_backend.configure_dhcp(dhcp_cfg)
+    else:
+        import subprocess
+        success = (
+            subprocess.run(
+                ["systemctl", "stop", "dnsmasq"],
+                capture_output=True,
+                text=True,
+                check=False,
+            ).returncode == 0
+        )
+
+    gateway_logging.log_info(
+        "DHCP configuration applied."
+        if success
+        else "DHCP configuration failed."
+    )
+
+    return success
 
 
 def configure_dns():
-    return True
+    cfg = _current_backend_config()
+
+    servers = cfg["dns"]["upstream_servers"]
+
+    if not CONFIG["dns_enabled"]:
+        import subprocess
+        result = subprocess.run(
+            ["systemctl", "stop", "dnsmasq"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        success = result.returncode == 0
+    else:
+        dns_backend.set_upstream_servers(servers)
+        success = True
+
+    gateway_logging.log_info(
+        "DNS configuration updated."
+        if success
+        else "DNS configuration failed."
+    )
+
+    return success
 
 
 def configure_firewall():
-    return True
+    cfg = _current_backend_config()
+
+    lan = cfg["network"]["lan_interface"]
+    wan = cfg["network"]["wan_interface"]
+
+    if not CONFIG["firewall_enabled"]:
+        import subprocess
+        result = subprocess.run(
+            ["systemctl", "stop", "nftables"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        success = result.returncode == 0
+    else:
+        firewall_backend.save_ruleset(lan, wan)
+        success = firewall_backend.apply_firewall_rules(lan, wan)
+
+    gateway_logging.log_info(
+        "Firewall configuration updated."
+        if success
+        else "Firewall configuration failed."
+    )
+
+    return success
 
 
 def configure_vpn():
+    gateway_logging.log_info(
+        "VPN configuration toggle updated."
+    )
     return True
 
 
@@ -76,6 +202,11 @@ def add_log(message):
 
     if len(LOGS) > 100:
         LOGS.pop()
+
+    try:
+        gateway_logging.log_info(message)
+    except Exception:
+        pass
 
 
 # ============================================================
@@ -148,24 +279,12 @@ def network():
 
         return redirect(url_for("network"))
 
-    try:
-        network_status = network_backend.get_network_status()
-    except Exception as error:
-        network_status = {
-            "interfaces": {},
-            "default_route": None,
-            "ipv4_forwarding": None,
-            "routes": [],
-            "error": str(error),
-        }
-
     return render_template_string(
         HTML,
         page="network",
         config=CONFIG,
         logs=LOGS,
-        health=None,
-        network_status=network_status
+        health=None
     )
 
 
@@ -954,6 +1073,216 @@ HTML = """
                 {% if page == "dashboard" %}
                     Dashboard
                 {% elif page == "network" %}
+                    Network
+                {% elif page == "dhcp" %}
+                    DHCP
+                {% elif page == "dns" %}
+                    DNS
+                {% elif page == "firewall" %}
+                    Firewall
+                {% elif page == "vpn" %}
+                    VPN
+                {% elif page == "monitoring" %}
+                    Monitoring
+                {% elif page == "logs" %}
+                    Logs
+                {% endif %}
+
+            </h1>
+
+
+            <div class="status">
+
+                <div class="status-dot"></div>
+
+                PiServer Online
+
+            </div>
+
+        </div>
+
+
+        <!-- ================================================= -->
+        <!-- DASHBOARD -->
+        <!-- ================================================= -->
+
+        {% if page == "dashboard" %}
+
+
+            <div class="cards">
+
+
+                <div class="card">
+
+                    <div class="card-title">
+                        CPU Usage
+                    </div>
+
+                    <div
+                        class="card-value"
+                        id="dashboard-cpu-usage"
+                    >
+
+                        {% if health.system.cpu_usage is not none %}
+                            {{ "%.1f"|format(health.system.cpu_usage) }}%
+                        {% else %}
+                            --
+                        {% endif %}
+
+                    </div>
+
+                </div>
+
+
+                <div class="card">
+
+                    <div class="card-title">
+                        Memory
+                    </div>
+
+                    <div
+                        class="card-value"
+                        id="dashboard-memory-usage"
+                    >
+
+                        {% if health.system.memory_usage is not none %}
+                            {{ "%.1f"|format(health.system.memory_usage) }}%
+                        {% else %}
+                            --
+                        {% endif %}
+
+                    </div>
+
+                </div>
+
+
+                <div class="card">
+
+                    <div class="card-title">
+                        Temperature
+                    </div>
+
+                    <div
+                        class="card-value"
+                        id="dashboard-temperature"
+                    >
+
+                        {% if health.system.temperature is not none %}
+                            {{ "%.1f"|format(health.system.temperature) }} °C
+                        {% else %}
+                            --
+                        {% endif %}
+
+                    </div>
+
+                </div>
+
+
+                <div class="card">
+
+                    <div class="card-title">
+                        TCP Connections
+                    </div>
+
+                    <div
+                        class="card-value"
+                        id="dashboard-connections"
+                    >
+
+                        {% if health.connections is not none %}
+                            {{ health.connections }}
+                        {% else %}
+                            --
+                        {% endif %}
+
+                    </div>
+
+                </div>
+
+
+            </div>
+
+
+            <div class="section">
+
+                <h2>
+                    Gateway Services
+                </h2>
+
+
+                <div class="info-grid">
+
+
+                    <div class="info-item">
+
+                        <div class="info-label">
+                            SSH
+                        </div>
+
+                        <div
+                            class="info-value"
+                            id="dashboard-ssh-status"
+                        >
+
+                            {% if health.services.ssh == "active" %}
+
+                                <span class="green">
+                                    Active
+                                </span>
+
+                            {% else %}
+
+                                <span class="red">
+                                    {{ health.services.ssh }}
+                                </span>
+
+                            {% endif %}
+
+                        </div>
+
+                    </div>
+
+
+                    <div class="info-item">
+
+                        <div class="info-label">
+                            WireGuard
+                        </div>
+
+                        <div
+                            class="info-value"
+                            id="dashboard-wireguard-status"
+                        >
+
+                            {% if health.services.wireguard == "active" %}
+
+                                <span class="green">
+                                    Active
+                                </span>
+
+                            {% else %}
+
+                                <span class="yellow">
+                                    {{ health.services.wireguard }}
+                                </span>
+
+                            {% endif %}
+
+                        </div>
+
+                    </div>
+
+
+                </div>
+
+            </div>
+
+
+        <!-- ================================================= -->
+        <!-- NETWORK -->
+        <!-- ================================================= -->
+
+        {% elif page == "network" %}
 
 
             <div class="section">
@@ -984,7 +1313,7 @@ HTML = """
                     <div class="form-group">
 
                         <label>
-                            WAN Interface
+                            Interface
                         </label>
 
                         <input
@@ -1039,14 +1368,14 @@ HTML = """
                     <div class="form-group">
 
                         <label>
-                            LAN IP Address
+                            IP Address
                         </label>
 
                         <input
                             type="text"
                             name="ip_address"
                             value="{{ config.ip_address }}"
-                            placeholder="192.168.50.1"
+                            placeholder="192.168.1.1"
                         >
 
                     </div>
@@ -1055,14 +1384,14 @@ HTML = """
                     <div class="form-group">
 
                         <label>
-                            Upstream Gateway
+                            Gateway
                         </label>
 
                         <input
                             type="text"
                             name="gateway"
                             value="{{ config.gateway }}"
-                            placeholder="192.168.0.1"
+                            placeholder="192.168.1.1"
                         >
 
                     </div>
@@ -1108,194 +1437,6 @@ HTML = """
 
 
                 </form>
-
-            </div>
-
-
-            <div class="cards">
-
-
-                <div class="card">
-
-                    <div class="card-title">
-                        Default Route
-                    </div>
-
-                    <div class="info-value">
-                        {{ network_status.default_route or "None" }}
-                    </div>
-
-                </div>
-
-
-                <div class="card">
-
-                    <div class="card-title">
-                        IPv4 Forwarding
-                    </div>
-
-                    <div class="card-value">
-                        {% if network_status.ipv4_forwarding is sameas true %}
-                            <span class="green">Enabled</span>
-                        {% elif network_status.ipv4_forwarding is sameas false %}
-                            <span class="yellow">Disabled</span>
-                        {% else %}
-                            <span class="red">Unknown</span>
-                        {% endif %}
-                    </div>
-
-                </div>
-
-
-                <div class="card">
-
-                    <div class="card-title">
-                        Interfaces
-                    </div>
-
-                    <div class="card-value">
-                        {{ network_status.interfaces|length }}
-                    </div>
-
-                </div>
-
-            </div>
-
-
-            {% if network_status.error %}
-
-                <div class="section">
-                    <h2>Network Monitoring Error</h2>
-                    <div class="info-value red">
-                        {{ network_status.error }}
-                    </div>
-                </div>
-
-            {% endif %}
-
-
-            <div class="section">
-
-                <h2>
-                    Interfaces
-                </h2>
-
-                {% if network_status.interfaces %}
-
-                    <div class="info-grid">
-
-                        {% for name, interface in network_status.interfaces.items() %}
-
-                            <div class="info-item">
-
-                                <div class="info-label">
-                                    Interface
-                                </div>
-
-                                <div class="info-value">
-                                    {{ name }}
-                                </div>
-
-                                <div class="info-label">
-                                    Type
-                                </div>
-
-                                <div class="info-value">
-                                    {{ interface.type or "unknown" }}
-                                </div>
-
-                                <div class="info-label">
-                                    Status
-                                </div>
-
-                                <div class="info-value">
-                                    {% if interface.status == "up" %}
-                                        <span class="green">{{ interface.status }}</span>
-                                    {% elif interface.status == "down" %}
-                                        <span class="red">{{ interface.status }}</span>
-                                    {% else %}
-                                        <span class="yellow">{{ interface.status or "unknown" }}</span>
-                                    {% endif %}
-                                </div>
-
-                                <div class="info-label">
-                                    MAC Address
-                                </div>
-
-                                <div class="info-value">
-                                    {{ interface.mac or "None" }}
-                                </div>
-
-                                <div class="info-label">
-                                    Addresses
-                                </div>
-
-                                <div class="info-value">
-                                    {% if interface.addresses %}
-                                        {% for address in interface.addresses %}
-                                            <div>{{ address }}</div>
-                                        {% endfor %}
-                                    {% else %}
-                                        None
-                                    {% endif %}
-                                </div>
-
-                            </div>
-
-                        {% endfor %}
-
-                    </div>
-
-                {% else %}
-
-                    <div class="info-label">
-                        No interfaces detected.
-                    </div>
-
-                {% endif %}
-
-            </div>
-
-
-            <div class="section">
-
-                <h2>
-                    Routing Table
-                </h2>
-
-                {% if network_status.routes %}
-
-                    <div style="overflow-x:auto;">
-
-                        <table style="width:100%; border-collapse:collapse;">
-
-                            <thead>
-                                <tr>
-                                    <th style="text-align:left; padding:10px; border-bottom:1px solid #eee;">Route</th>
-                                </tr>
-                            </thead>
-
-                            <tbody>
-                                {% for route in network_status.routes %}
-                                    <tr>
-                                        <td style="padding:10px; border-bottom:1px solid #f0f0f0; font-family:monospace;">
-                                            {{ route }}
-                                        </td>
-                                    </tr>
-                                {% endfor %}
-                            </tbody>
-
-                        </table>
-
-                    </div>
-
-                {% else %}
-
-                    <div class="info-label">
-                        No routes detected.
-                    </div>
-
-                {% endif %}
 
             </div>
 
