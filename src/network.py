@@ -3,11 +3,21 @@ import subprocess
 import os
 
 
+def _run(command):
+    return subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 ## Interface Discovery ##
 
 
 def get_interfaces():
     return [name for _, name in socket.if_nameindex()]
+
 
 def get_interface_status(interface):
     try:
@@ -16,15 +26,14 @@ def get_interface_status(interface):
     except FileNotFoundError:
         return None
 
+
 def get_interface_type(interface):
     interface_path = f"/sys/class/net/{interface}"
 
     try:
-        # Check whether Linux identifies this as a wireless interface
         if os.path.isdir(f"{interface_path}/wireless"):
             return "wifi"
 
-        # Otherwise check the Linux interface type
         with open(f"{interface_path}/type", "r") as file:
             interface_type = int(file.read().strip())
 
@@ -44,21 +53,18 @@ def get_interface_type(interface):
 
 
 def get_ip_addresses(interface):
-    result = subprocess.run(
-        ["ip", "addr", "show", interface],
-        capture_output=True,
-        text=True
-    )
+    result = _run(["ip", "addr", "show", interface])
 
     addresses = []
 
     for line in result.stdout.splitlines():
         parts = line.split()
 
-        if parts and (parts[0] == "inet" or parts[0] == "inet6"):
+        if parts and parts[0] in ("inet", "inet6"):
             addresses.append(parts[1])
 
     return addresses
+
 
 def get_mac_address(interface):
     try:
@@ -68,29 +74,69 @@ def get_mac_address(interface):
         return None
 
 
+def get_interface_info(interface):
+    return {
+        "name": interface,
+        "status": get_interface_status(interface),
+        "type": get_interface_type(interface),
+        "addresses": get_ip_addresses(interface),
+        "mac": get_mac_address(interface),
+    }
+
+
+def get_all_interface_info():
+    return {
+        interface: get_interface_info(interface)
+        for interface in get_interfaces()
+    }
+
+
 ## Routing ##
 
 
 def get_routes():
-    result = subprocess.run(
-        ["ip", "route"],
-        capture_output=True,
-        text=True
-    )
+    result = _run(["ip", "route"])
+    return [line for line in result.stdout.splitlines() if line.strip()]
 
-    routes = []
-
-    for line in result.stdout.splitlines():
-        routes.append(line)
-
-    return routes
 
 def get_default_route():
-    routes = get_routes()
-
-    for route in routes:
+    for route in get_routes():
         if route.startswith("default"):
             return route
 
     return None
-    
+
+
+def enable_ipv4_forwarding():
+    try:
+        with open("/proc/sys/net/ipv4/ip_forward", "w", encoding="utf-8") as file:
+            file.write("1\n")
+        return True
+    except OSError:
+        return False
+
+
+def is_ipv4_forwarding_enabled():
+    try:
+        with open("/proc/sys/net/ipv4/ip_forward", "r", encoding="utf-8") as file:
+            return file.read().strip() == "1"
+    except OSError:
+        return False
+
+
+def configure_lan_address(interface, address):
+    result = _run(["ip", "addr", "replace", address, "dev", interface])
+    return result.returncode == 0
+
+
+def bring_interface_up(interface):
+    result = _run(["ip", "link", "set", interface, "up"])
+    return result.returncode == 0
+
+
+def get_network_status():
+    return {
+        "interfaces": get_all_interface_info(),
+        "default_route": get_default_route(),
+        "ipv4_forwarding": is_ipv4_forwarding_enabled(),
+    }

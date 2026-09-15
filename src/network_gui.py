@@ -1,7 +1,13 @@
 
 from flask import Flask, request, redirect, url_for, render_template_string, jsonify
 from datetime import datetime
+import config as gateway_config
+import network as network_backend
+import dns as dns_backend
+import dhcp as dhcp_backend
+import firewall as firewall_backend
 import monitoring
+import logging as gateway_logging
 
 app = Flask(__name__)
 
@@ -10,18 +16,38 @@ app = Flask(__name__)
 # Temporary configuration storage
 # ============================================================
 
+try:
+    _BOOT_CONFIG = gateway_config.load_config()
+    _BOOT_NETWORK = _BOOT_CONFIG["network"]
+    _BOOT_DNS = _BOOT_CONFIG["dns"]
+    _BOOT_DHCP = _BOOT_CONFIG["dhcp"]
+    _BOOT_FIREWALL = _BOOT_CONFIG["firewall"]
+    _BOOT_VPN = _BOOT_CONFIG["vpn"]
+except Exception:
+    _BOOT_CONFIG = {}
+    _BOOT_NETWORK = {}
+    _BOOT_DNS = {}
+    _BOOT_DHCP = {}
+    _BOOT_FIREWALL = {}
+    _BOOT_VPN = {}
+
+
 CONFIG = {
-    "hostname": "DomPi",
-    "interface": "wlan0",
+    "hostname": _BOOT_CONFIG.get("hostname", "DomPi"),
+    "interface": _BOOT_NETWORK.get("wan_interface", "wlan0"),
     "mode": "gateway",
-    "ip_address": "",
+    "ip_address": _BOOT_NETWORK.get("lan_address", "").split("/")[0],
     "gateway": "",
     "netmask": "255.255.255.0",
-    "dns": "",
-    "dhcp_enabled": True,
-    "dns_enabled": True,
-    "firewall_enabled": True,
-    "vpn_enabled": False,
+    "dns": (
+        _BOOT_DNS.get("upstream_servers", ["1.1.1.1"])[0]
+        if _BOOT_DNS
+        else "1.1.1.1"
+    ),
+    "dhcp_enabled": _BOOT_DHCP.get("enabled", True),
+    "dns_enabled": _BOOT_DNS.get("enabled", True),
+    "firewall_enabled": _BOOT_FIREWALL.get("enabled", True),
+    "vpn_enabled": _BOOT_VPN.get("enabled", False),
 }
 
 
@@ -32,23 +58,123 @@ LOGS = []
 # Configuration functions
 # ============================================================
 
+def _current_backend_config():
+    """Translate the GUI's temporary CONFIG format into gateway config."""
+    cfg = gateway_config.load_config()
+
+    cfg["hostname"] = CONFIG["hostname"]
+
+    cfg["network"]["wan_interface"] = CONFIG["interface"]
+    cfg["network"]["lan_interface"] = cfg["network"].get(
+        "lan_interface",
+        "eth1"
+    )
+
+    if CONFIG["ip_address"]:
+        cfg["network"]["lan_address"] = (
+            f'{CONFIG["ip_address"]}/{CONFIG["netmask"]}'
+        )
+
+    return cfg
+
+
 def configure_network():
+    cfg = _current_backend_config()
+
+    gateway_config.save_config(cfg)
+    gateway_logging.log_info("Network configuration updated.")
+
     return True
 
 
 def configure_dhcp():
-    return True
+    cfg = _current_backend_config()
+
+    dhcp_cfg = dict(cfg["dhcp"])
+    dhcp_cfg["interface"] = cfg["network"]["lan_interface"]
+    dhcp_cfg["address"] = cfg["network"]["lan_address"].split("/")[0]
+
+    if CONFIG["dhcp_enabled"]:
+        success = dhcp_backend.configure_dhcp(dhcp_cfg)
+    else:
+        import subprocess
+        success = (
+            subprocess.run(
+                ["systemctl", "stop", "dnsmasq"],
+                capture_output=True,
+                text=True,
+                check=False,
+            ).returncode == 0
+        )
+
+    gateway_logging.log_info(
+        "DHCP configuration applied."
+        if success
+        else "DHCP configuration failed."
+    )
+
+    return success
 
 
 def configure_dns():
-    return True
+    cfg = _current_backend_config()
+
+    servers = cfg["dns"]["upstream_servers"]
+
+    if not CONFIG["dns_enabled"]:
+        import subprocess
+        result = subprocess.run(
+            ["systemctl", "stop", "dnsmasq"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        success = result.returncode == 0
+    else:
+        dns_backend.set_upstream_servers(servers)
+        success = True
+
+    gateway_logging.log_info(
+        "DNS configuration updated."
+        if success
+        else "DNS configuration failed."
+    )
+
+    return success
 
 
 def configure_firewall():
-    return True
+    cfg = _current_backend_config()
+
+    lan = cfg["network"]["lan_interface"]
+    wan = cfg["network"]["wan_interface"]
+
+    if not CONFIG["firewall_enabled"]:
+        import subprocess
+        result = subprocess.run(
+            ["systemctl", "stop", "nftables"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        success = result.returncode == 0
+    else:
+        firewall_backend.save_ruleset(lan, wan)
+        success = firewall_backend.apply_firewall_rules(lan, wan)
+
+    gateway_logging.log_info(
+        "Firewall configuration updated."
+        if success
+        else "Firewall configuration failed."
+    )
+
+    return success
 
 
 def configure_vpn():
+    gateway_logging.log_info(
+        "VPN configuration toggle updated."
+    )
     return True
 
 
@@ -76,6 +202,11 @@ def add_log(message):
 
     if len(LOGS) > 100:
         LOGS.pop()
+
+    try:
+        gateway_logging.log_info(message)
+    except Exception:
+        pass
 
 
 # ============================================================

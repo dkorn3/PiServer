@@ -391,3 +391,12 @@ def get_gateway_health():
         "dhcp": get_dhcp_health(),
         "firewall": get_firewall_health(),
     }
+
+
+# Convenience wrapper for the rest of the project.
+def get_network_health():
+    try:
+        import network
+        return network.get_network_status()
+    except (ImportError, AttributeError):
+        return {"status": "unknown"}
