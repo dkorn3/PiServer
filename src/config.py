@@ -22,7 +22,7 @@ DEFAULT_CONFIG = {
         "lan_address": "192.168.50.1/24",
         "lan_network": "192.168.50.0/24",
         "ipv4_forwarding": False,
-        "nat_enabled": True,
+        "nat_enabled": False,
     },
     "firewall": {
         "enabled": False,
