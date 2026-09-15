@@ -1,33 +1,51 @@
+import os
 import socket
 import subprocess
-import os
 
 
-def _run(command):
+# ============================================================
+# Helpers
+# ============================================================
+
+def run_command(command, check=False):
+    """
+    Run a system command and return the CompletedProcess object.
+    """
     return subprocess.run(
         command,
         capture_output=True,
         text=True,
-        check=False,
+        check=check
     )
 
 
-## Interface Discovery ##
-
+# ============================================================
+# Interface Discovery
+# ============================================================
 
 def get_interfaces():
+    """
+    Return all network interface names.
+    """
     return [name for _, name in socket.if_nameindex()]
 
 
 def get_interface_status(interface):
+    """
+    Return Linux operational state for an interface.
+    """
     try:
         with open(f"/sys/class/net/{interface}/operstate", "r") as file:
             return file.read().strip()
+
     except FileNotFoundError:
         return None
 
 
 def get_interface_type(interface):
+    """
+    Return a human-readable interface type.
+    """
     interface_path = f"/sys/class/net/{interface}"
 
     try:
@@ -49,11 +67,20 @@ def get_interface_type(interface):
         return None
 
 
-## Address Info ##
-
+# ============================================================
+# Address Information
+# ============================================================
 
 def get_ip_addresses(interface):
-    result = _run(["ip", "addr", "show", interface])
+    """
+    Return IPv4 and IPv6 addresses assigned to an interface.
+    """
+    result = run_command(
+        ["ip", "addr", "show", interface]
+    )
+
+    if result.returncode != 0:
+        return []
 
     addresses = []
 
@@ -67,39 +94,41 @@ def get_ip_addresses(interface):
 
 
 def get_mac_address(interface):
+    """
+    Return the MAC address of an interface.
+    """
     try:
         with open(f"/sys/class/net/{interface}/address", "r") as file:
             return file.read().strip()
+
     except FileNotFoundError:
         return None
 
 
-def get_interface_info(interface):
-    return {
-        "name": interface,
-        "status": get_interface_status(interface),
-        "type": get_interface_type(interface),
-        "addresses": get_ip_addresses(interface),
-        "mac": get_mac_address(interface),
-    }
-
-
-def get_all_interface_info():
-    return {
-        interface: get_interface_info(interface)
-        for interface in get_interfaces()
-    }
-
-
-## Routing ##
-
+# ============================================================
+# Routing
+# ============================================================
 
 def get_routes():
-    result = _run(["ip", "route"])
-    return [line for line in result.stdout.splitlines() if line.strip()]
+    """
+    Return the kernel routing table.
+    """
+    result = run_command(["ip", "route"])
+
+    if result.returncode != 0:
+        return []
+
+    return [
+        line
+        for line in result.stdout.splitlines()
+        if line.strip()
+    ]
 
 
 def get_default_route():
+    """
+    Return the current default IPv4 route.
+    """
     for route in get_routes():
         if route.startswith("default"):
             return route
@@ -107,36 +136,144 @@ def get_default_route():
     return None
 
 
-def enable_ipv4_forwarding():
-    try:
-        with open("/proc/sys/net/ipv4/ip_forward", "w", encoding="utf-8") as file:
-            file.write("1\n")
-        return True
-    except OSError:
-        return False
+# ============================================================
+# IPv4 Forwarding
+# ============================================================
 
-
-def is_ipv4_forwarding_enabled():
+def get_ipv4_forwarding():
+    """
+    Return whether Linux IPv4 forwarding is enabled.
+    """
     try:
-        with open("/proc/sys/net/ipv4/ip_forward", "r", encoding="utf-8") as file:
+        with open("/proc/sys/net/ipv4/ip_forward", "r") as file:
             return file.read().strip() == "1"
-    except OSError:
-        return False
+
+    except (FileNotFoundError, OSError):
+        return None
 
 
-def configure_lan_address(interface, address):
-    result = _run(["ip", "addr", "replace", address, "dev", interface])
-    return result.returncode == 0
+def set_ipv4_forwarding(enabled):
+    """
+    Enable or disable IPv4 forwarding.
+
+    Requires root privileges.
+    """
+    value = "1" if enabled else "0"
+
+    result = run_command(
+        ["sysctl", "-w", f"net.ipv4.ip_forward={value}"]
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            result.stderr.strip() or "Failed to change IPv4 forwarding"
+        )
+
+    return get_ipv4_forwarding()
 
 
-def bring_interface_up(interface):
-    result = _run(["ip", "link", "set", interface, "up"])
-    return result.returncode == 0
+# ============================================================
+# LAN Configuration
+# ============================================================
 
+def configure_lan(interface, address="192.168.50.1/24"):
+    """
+    Configure the protected LAN interface with a static IPv4 address.
+
+    This function:
+    - verifies that the interface exists
+    - brings it up
+    - assigns the configured address
+
+    It does not configure DHCP, NAT, or firewall rules.
+    """
+    if interface not in get_interfaces():
+        raise RuntimeError(
+            f"LAN interface '{interface}' does not exist"
+        )
+
+    result = run_command(
+        ["ip", "link", "set", "dev", interface, "up"]
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            result.stderr.strip() or
+            f"Failed to bring {interface} up"
+        )
+
+    result = run_command(
+        ["ip", "addr", "replace", address, "dev", interface]
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            result.stderr.strip() or
+            f"Failed to assign {address} to {interface}"
+        )
+
+    return {
+        "interface": interface,
+        "address": address,
+        "status": get_interface_status(interface),
+        "addresses": get_ip_addresses(interface),
+    }
+
+
+# ============================================================
+# Network Status
+# ============================================================
 
 def get_network_status():
+    """
+    Return a complete snapshot of network state.
+    """
+    interfaces = {}
+
+    for interface in get_interfaces():
+        interfaces[interface] = {
+            "name": interface,
+            "status": get_interface_status(interface),
+            "type": get_interface_type(interface),
+            "mac": get_mac_address(interface),
+            "addresses": get_ip_addresses(interface),
+        }
+
     return {
-        "interfaces": get_all_interface_info(),
+        "interfaces": interfaces,
         "default_route": get_default_route(),
-        "ipv4_forwarding": is_ipv4_forwarding_enabled(),
+        "ipv4_forwarding": get_ipv4_forwarding(),
+        "routes": get_routes(),
     }
+
+
+# ============================================================
+# Test
+# ============================================================
+
+if __name__ == "__main__":
+    print("=== INTERFACES ===")
+
+    for interface in get_interfaces():
+        print(
+            interface,
+            "|",
+            get_interface_type(interface),
+            "|",
+            get_interface_status(interface),
+            "|",
+            get_ip_addresses(interface)
+        )
+
+    print()
+    print("=== DEFAULT ROUTE ===")
+    print(get_default_route())
+
+    print()
+    print("=== IPV4 FORWARDING ===")
+    print(get_ipv4_forwarding())
+
+    print()
+    print("=== ROUTES ===")
+    for route in get_routes():
+        print(route)
