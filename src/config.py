@@ -48,8 +48,8 @@ DEFAULT_CONFIG = {
         "blocklist": [],
     },
     "dhcp": {
-        "enabled": False,
-        "interface": "eth0",
+        "enabled": True,
+        "interface": "wlan0",
         "range_start": "192.168.50.100",
         "range_end": "192.168.50.200",
         "subnet_mask": "255.255.255.0",
