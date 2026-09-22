@@ -1,0 +1,49 @@
+network:
+  wan_interface: eth0
+  wan_dhcp: true
+  lan_interface: wlan0
+  lan_address: 192.168.50.1/24
+  lan_network: 192.168.50.0/24
+  ipv4_forwarding: true
+  nat_enabled: false
+firewall:
+  enabled: false
+  table: inet pi_gateway
+  default_policy: drop
+  allow_established: true
+  allow_related: true
+  allow_lan_to_wan: true
+  allow_dhcp: true
+  allow_dns: true
+  allow_ssh: true
+  allow_management_from_wan: false
+  rules: []
+dns:
+  enabled: false
+  listen_address: 192.168.50.1
+  listen_port: 53
+  upstream_servers:
+  - 1.1.1.1
+  - 9.9.9.9
+  block_direct_dns: true
+  logging: true
+  allowlist: []
+  blocklist: []
+dhcp:
+  enabled: true
+  interface: wlan0
+  range_start: 192.168.50.100
+  range_end: 192.168.50.200
+  subnet_mask: 255.255.255.0
+  gateway: 192.168.50.1
+  dns_server: 192.168.50.1
+  lease_time: 86400
+  reservations: []
+vpn:
+  enabled: false
+  interface: wg0
+  config_file: /etc/wireguard/wg0.conf
+  kill_switch: false
+  endpoint: ''
+  allowed_ips: []
+  dns: []
