@@ -1476,63 +1476,6 @@ HTML = """
 
                 {% else %}
 
-                    <div class="cards">
-
-                        <div class="card">
-
-                            <div class="card-title">
-                                Default Route
-                            </div>
-
-                            <div class="card-value">
-                                {{ network_status.default_route or "--" }}
-                            </div>
-
-                        </div>
-
-
-                        <div class="card">
-
-                            <div class="card-title">
-                                IPv4 Forwarding
-                            </div>
-
-                            <div class="card-value">
-
-                                {% if network_status.ipv4_forwarding %}
-                                    <span class="green">
-                                        Enabled
-                                    </span>
-                                {% elif network_status.ipv4_forwarding is false %}
-                                    <span class="yellow">
-                                        Disabled
-                                    </span>
-                                {% else %}
-                                    <span class="red">
-                                        Unknown
-                                    </span>
-                                {% endif %}
-
-                            </div>
-
-                        </div>
-
-
-                        <div class="card">
-
-                            <div class="card-title">
-                                Interfaces
-                            </div>
-
-                            <div class="card-value">
-                                {{ network_status.interfaces|length }}
-                            </div>
-
-                        </div>
-
-                    </div>
-
-
                     <div class="section">
 
                         <h2>
