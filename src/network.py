@@ -1,6 +1,16 @@
+```python
 import os
 import socket
 import subprocess
+
+
+# ============================================================
+# PiServer Network Configuration
+# ============================================================
+
+WAN_INTERFACE = "eth0"
+LAN_INTERFACE = "wlan0"
+LAN_ADDRESS = "192.168.50.1/24"
 
 
 # ============================================================
@@ -166,7 +176,8 @@ def set_ipv4_forwarding(enabled):
 
     if result.returncode != 0:
         raise RuntimeError(
-            result.stderr.strip() or "Failed to change IPv4 forwarding"
+            result.stderr.strip() or
+            "Failed to change IPv4 forwarding"
         )
 
     return get_ipv4_forwarding()
@@ -176,7 +187,7 @@ def set_ipv4_forwarding(enabled):
 # LAN Configuration
 # ============================================================
 
-def configure_lan(interface, address="192.168.50.1/24"):
+def configure_lan(interface, address=LAN_ADDRESS):
     """
     Configure the protected LAN interface with a static IPv4 address.
 
@@ -221,6 +232,64 @@ def configure_lan(interface, address="192.168.50.1/24"):
 
 
 # ============================================================
+# Router Configuration
+# ============================================================
+
+def configure_router():
+    """
+    Configure PiServer as a basic IPv4 router.
+
+    WAN:
+        eth0 → upstream router / Internet
+
+    LAN:
+        wlan0 → PiServer Wi-Fi clients
+
+    This function:
+    - verifies both interfaces exist
+    - brings both interfaces up
+    - configures the LAN address
+    - enables IPv4 forwarding
+
+    NAT, DHCP, DNS, and firewall rules are handled
+    by their respective PiServer modules.
+    """
+
+    if WAN_INTERFACE not in get_interfaces():
+        raise RuntimeError(
+            f"WAN interface '{WAN_INTERFACE}' does not exist"
+        )
+
+    if LAN_INTERFACE not in get_interfaces():
+        raise RuntimeError(
+            f"LAN interface '{LAN_INTERFACE}' does not exist"
+        )
+
+    # Bring both interfaces up
+    for interface in (WAN_INTERFACE, LAN_INTERFACE):
+        result = run_command(
+            ["ip", "link", "set", "dev", interface, "up"]
+        )
+
+        if result.returncode != 0:
+            raise RuntimeError(
+                result.stderr.strip() or
+                f"Failed to bring {interface} up"
+            )
+
+    # Configure LAN
+    configure_lan(
+        LAN_INTERFACE,
+        LAN_ADDRESS
+    )
+
+    # Enable IPv4 forwarding
+    set_ipv4_forwarding(True)
+
+    return get_network_status()
+
+
+# ============================================================
 # Network Status
 # ============================================================
 
@@ -244,6 +313,9 @@ def get_network_status():
         "default_route": get_default_route(),
         "ipv4_forwarding": get_ipv4_forwarding(),
         "routes": get_routes(),
+        "wan_interface": WAN_INTERFACE,
+        "lan_interface": LAN_INTERFACE,
+        "lan_address": LAN_ADDRESS,
     }
 
 
@@ -252,6 +324,12 @@ def get_network_status():
 # ============================================================
 
 if __name__ == "__main__":
+    print("=== PISERVER NETWORK CONFIGURATION ===")
+    print(f"WAN interface: {WAN_INTERFACE}")
+    print(f"LAN interface: {LAN_INTERFACE}")
+    print(f"LAN address:   {LAN_ADDRESS}")
+
+    print()
     print("=== INTERFACES ===")
 
     for interface in get_interfaces():
@@ -275,5 +353,7 @@ if __name__ == "__main__":
 
     print()
     print("=== ROUTES ===")
+
     for route in get_routes():
         print(route)
+```
