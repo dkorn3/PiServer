@@ -1,27 +1,13 @@
-sudo apt install python3-flask
-sudo apt install python3-psutil -y
+git clone https://github.com/dkorn3/PiServer.git
+cd PiServer
+chmod +x scripts/setup.sh
+sudo ./scripts/setup.sh
 
-sudo nano /etc/systemd/system/pi-gateway.service
 
-[Unit]
-Description=Raspberry Pi Network Gateway GUI
-After=network-online.target
-Wants=network-online.target
 
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/home/(your Pi Username)/PiServer/src
-ExecStart=/usr/bin/python3 /home/(your Pi Username)/PiServer/src/network_gui.py
-Restart=always
-RestartSec=3
 
-[Install]
-WantedBy=multi-user.target
 
-sudo systemctl daemon-reload
-sudo systemctl enable pi-gateway
-sudo systemctl start pi-gateway
+
 
 
 ## Phase 1 — Base Linux System
