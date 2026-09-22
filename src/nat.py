@@ -1,14 +1,11 @@
 
 import subprocess
 
-
-WAN_INTERFACE = "eth0"
-LAN_INTERFACE = "wlan0"
-LAN_SUBNET = "192.168.50.0/24"
+from config import load_config
 
 
-def run_command(command):
-    """Run a system command and return the result."""
+def _run(command):
+    """Run a system command and return the completed process."""
     return subprocess.run(
         command,
         capture_output=True,
@@ -17,21 +14,44 @@ def run_command(command):
     )
 
 
-def configure_nat():
-    """Configure NAT for traffic from the PiServer LAN."""
+def _get_network_settings():
+    """Load WAN/LAN settings from the PiServer configuration."""
+    config = load_config()
+    network = config["network"]
 
-    # Create NAT table.
-    result = run_command(
+    return {
+        "wan_interface": network["wan_interface"],
+        "lan_interface": network["lan_interface"],
+        "lan_network": network["lan_network"],
+    }
+
+
+def configure_nat():
+    """
+    Configure IPv4 masquerading for PiServer LAN traffic.
+
+    Traffic originating from the LAN subnet is NATed when
+    leaving through the WAN interface.
+    """
+    settings = _get_network_settings()
+
+    wan_interface = settings["wan_interface"]
+    lan_network = settings["lan_network"]
+
+    # Create the PiServer NAT table.
+    result = _run(
         ["nft", "add", "table", "ip", "piserver_nat"]
     )
 
-    if result.returncode != 0 and "exists" not in result.stderr.lower():
-        raise RuntimeError(
-            result.stderr.strip() or "Failed to create NAT table"
-        )
+    if result.returncode != 0:
+        if "exists" not in result.stderr.lower():
+            raise RuntimeError(
+                result.stderr.strip()
+                or "Failed to create NAT table"
+            )
 
-    # Create postrouting chain.
-    result = run_command(
+    # Create the postrouting chain.
+    result = _run(
         [
             "nft",
             "add",
@@ -54,13 +74,15 @@ def configure_nat():
         ]
     )
 
-    if result.returncode != 0 and "exists" not in result.stderr.lower():
-        raise RuntimeError(
-            result.stderr.strip() or "Failed to create NAT chain"
-        )
+    if result.returncode != 0:
+        if "exists" not in result.stderr.lower():
+            raise RuntimeError(
+                result.stderr.strip()
+                or "Failed to create NAT postrouting chain"
+            )
 
-    # Masquerade PiServer LAN traffic leaving through eth0.
-    result = run_command(
+    # Masquerade LAN traffic leaving through the WAN.
+    result = _run(
         [
             "nft",
             "add",
@@ -69,26 +91,27 @@ def configure_nat():
             "piserver_nat",
             "postrouting",
             "oifname",
-            WAN_INTERFACE,
+            wan_interface,
             "ip",
             "saddr",
-            LAN_SUBNET,
+            lan_network,
             "masquerade",
         ]
     )
 
-    if result.returncode != 0 and "exists" not in result.stderr.lower():
-        raise RuntimeError(
-            result.stderr.strip() or "Failed to create NAT rule"
-        )
+    if result.returncode != 0:
+        if "exists" not in result.stderr.lower():
+            raise RuntimeError(
+                result.stderr.strip()
+                or "Failed to create NAT masquerade rule"
+            )
 
-    return True
+    return get_nat_status()
 
 
 def get_nat_status():
     """Return the current PiServer NAT configuration."""
-
-    result = run_command(
+    result = _run(
         ["nft", "list", "table", "ip", "piserver_nat"]
     )
 
@@ -105,8 +128,7 @@ def get_nat_status():
 
 def disable_nat():
     """Remove the PiServer NAT table."""
-
-    result = run_command(
+    result = _run(
         ["nft", "delete", "table", "ip", "piserver_nat"]
     )
 
@@ -115,7 +137,8 @@ def disable_nat():
             return True
 
         raise RuntimeError(
-            result.stderr.strip() or "Failed to disable NAT"
+            result.stderr.strip()
+            or "Failed to disable NAT"
         )
 
     return True
@@ -125,12 +148,13 @@ if __name__ == "__main__":
     print("=== PiServer NAT ===")
 
     try:
-        configure_nat()
-
-        status = get_nat_status()
+        status = configure_nat()
 
         print(f"NAT enabled: {status['enabled']}")
-        print(status["rules"])
 
-    except RuntimeError as error:
-        print(f"NAT configuration failed: {error}")
+        if status["rules"]:
+            print(status["rules"])
+
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"NAT configuration failed: {exc}")
+        raise SystemExit(1)
