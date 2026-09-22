@@ -5,7 +5,7 @@ CONFIG_PATH = "/etc/dnsmasq.d/pi-gateway.conf"
 LEASE_FILE = "/var/lib/misc/dnsmasq.leases"
 
 _DEFAULT_CONFIG = {
-    "interface": "eth1",
+    "interface": "wlan0",
     "address": "192.168.50.1",
     "range_start": "192.168.50.100",
     "range_end": "192.168.50.200",
