@@ -16,9 +16,9 @@ CONFIG_FILE = "config/gateway.yaml"
 
 DEFAULT_CONFIG = {
     "network": {
-        "wan_interface": "wlan0",
+        "wan_interface": "eth0",
         "wan_dhcp": True,
-        "lan_interface": "eth0",
+        "lan_interface": "wlan0",
         "lan_address": "192.168.50.1/24",
         "lan_network": "192.168.50.0/24",
         "ipv4_forwarding": False,
