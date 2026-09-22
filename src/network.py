@@ -1,4 +1,4 @@
-```python
+
 import os
 import socket
 import subprocess
@@ -356,4 +356,4 @@ if __name__ == "__main__":
 
     for route in get_routes():
         print(route)
-```
+
