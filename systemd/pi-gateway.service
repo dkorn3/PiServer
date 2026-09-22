@@ -1,0 +1,16 @@
+[Unit]
+Description=Raspberry Pi Network Gateway GUI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/dominikkornak/PiServer
+ExecStart=/usr/bin/python3 /home/dominikkornak/PiServer/src/network_gui.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+
