@@ -1,4 +1,4 @@
-```python
+
 import os
 import subprocess
 
@@ -240,4 +240,3 @@ if __name__ == "__main__":
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"DHCP check failed: {exc}")
         raise SystemExit(1)
-```
