@@ -1,12 +1,13 @@
-
+```python
+#!/usr/bin/env python3
 
 from flask import (
     Flask,
-    request,
-    redirect,
-    url_for,
-    render_template_string,
     jsonify,
+    redirect,
+    render_template_string,
+    request,
+    url_for,
 )
 from datetime import datetime
 import ipaddress
@@ -15,138 +16,73 @@ import subprocess
 import time
 
 import config as gateway_config
-import network as network_backend
-import dns as dns_backend
-import dhcp as dhcp_backend
-import firewall as firewall_backend
-import nat as nat_backend
 import monitoring
-import gateway_logger as gateway_logging
+import nat as nat_backend
+
+try:
+    import dhcp as dhcp_backend
+except ImportError:
+    dhcp_backend = None
+
+try:
+    import dns as dns_backend
+except ImportError:
+    dns_backend = None
+
+try:
+    import firewall as firewall_backend
+except ImportError:
+    firewall_backend = None
+
+try:
+    import vpn as vpn_backend
+except ImportError:
+    vpn_backend = None
+
+try:
+    import gateway_logger as gateway_logging
+except ImportError:
+    gateway_logging = None
 
 
 app = Flask(__name__)
 
 
 # ============================================================
-# Boot configuration
+# Configuration
 # ============================================================
 
-try:
-    _BOOT_CONFIG = gateway_config.load_config()
-except Exception:
-    _BOOT_CONFIG = {}
+def get_config():
+    """
+    Load the current PiServer configuration.
+    """
+    return gateway_config.load_config()
 
 
-_NETWORK = _BOOT_CONFIG.get("network", {})
-_DNS = _BOOT_CONFIG.get("dns", {})
-_DHCP = _BOOT_CONFIG.get("dhcp", {})
-_FIREWALL = _BOOT_CONFIG.get("firewall", {})
-_VPN = _BOOT_CONFIG.get("vpn", {})
+def get_network_config():
+    """
+    Return network configuration with safe defaults.
+    """
 
+    config = get_config()
 
-CONFIG = {
-    "hostname": _BOOT_CONFIG.get(
-        "hostname",
-        "PiServer",
-    ),
-
-    # WAN
-    "interface": _NETWORK.get(
-        "wan_interface",
-        "eth0",
-    ),
-
-    # LAN
-    "lan_interface": _NETWORK.get(
-        "lan_interface",
-        "wlan0",
-    ),
-
-    "mode": "gateway",
-
-    "ip_address": _NETWORK.get(
-        "lan_address",
-        "192.168.50.1/24",
-    ).split("/")[0],
-
-    "gateway": "",
-
-    "netmask": "255.255.255.0",
-
-    "dns": (
-        _DNS.get(
-            "upstream_servers",
-            ["1.1.1.1"],
-        )[0]
-        if _DNS.get("upstream_servers")
-        else "1.1.1.1"
-    ),
-
-    "dhcp_enabled": _DHCP.get(
-        "enabled",
-        True,
-    ),
-
-    "dns_enabled": _DNS.get(
-        "enabled",
-        False,
-    ),
-
-    "firewall_enabled": _FIREWALL.get(
-        "enabled",
-        False,
-    ),
-
-    "vpn_enabled": _VPN.get(
-        "enabled",
-        False,
-    ),
-
-    "nat_enabled": _NETWORK.get(
-        "nat_enabled",
-        False,
-    ),
-}
-
-
-LOGS = []
+    return config.get(
+        "network",
+        {}
+    )
 
 
 # ============================================================
-# Utility functions
+# Helpers
 # ============================================================
 
-def run_command(command):
+def command_exists(command):
     """
-    Run a Linux command safely and return stdout.
-    """
-
-    try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=5,
-        )
-
-        return result.stdout.strip()
-
-    except Exception:
-        return ""
-
-
-def service_active(service):
-    """
-    Return True if a systemd service is active.
+    Check whether a system command exists.
     """
 
     result = subprocess.run(
-        [
-            "systemctl",
-            "is-active",
-            service,
-        ],
+        ["which", command],
         capture_output=True,
         text=True,
         check=False,
@@ -155,565 +91,94 @@ def service_active(service):
     return result.returncode == 0
 
 
-def add_log(message):
+def run_command(command, timeout=5):
     """
-    Add an entry to the dashboard activity feed.
-    """
-
-    timestamp = datetime.now().strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
-
-    LOGS.insert(
-        0,
-        {
-            "time": timestamp,
-            "message": message,
-        },
-    )
-
-    if len(LOGS) > 100:
-        LOGS.pop()
-
-    try:
-        gateway_logging.log_info(message)
-    except Exception:
-        pass
-
-
-# ============================================================
-# Configuration
-# ============================================================
-
-def _current_backend_config():
-    """
-    Build the backend configuration from GUI settings.
-    """
-
-    cfg = gateway_config.load_config()
-
-    cfg["hostname"] = CONFIG["hostname"]
-
-    cfg["network"]["wan_interface"] = (
-        CONFIG["interface"]
-    )
-
-    cfg["network"]["lan_interface"] = (
-        CONFIG["lan_interface"]
-    )
-
-    if CONFIG["ip_address"]:
-
-        try:
-            prefix = ipaddress.IPv4Network(
-                "0.0.0.0/"
-                + CONFIG["netmask"]
-            ).prefixlen
-
-        except ValueError:
-            prefix = 24
-
-        cfg["network"]["lan_address"] = (
-            f'{CONFIG["ip_address"]}/{prefix}'
-        )
-
-        cfg["network"]["lan_network"] = str(
-            ipaddress.ip_interface(
-                cfg["network"]["lan_address"]
-            ).network
-        )
-
-    cfg["network"]["nat_enabled"] = (
-        CONFIG["nat_enabled"]
-    )
-
-    cfg["dhcp"]["enabled"] = (
-        CONFIG["dhcp_enabled"]
-    )
-
-    cfg["dns"]["enabled"] = (
-        CONFIG["dns_enabled"]
-    )
-
-    cfg["firewall"]["enabled"] = (
-        CONFIG["firewall_enabled"]
-    )
-
-    cfg["vpn"]["enabled"] = (
-        CONFIG["vpn_enabled"]
-    )
-
-    return cfg
-
-
-# ============================================================
-# NAT
-# ============================================================
-
-def configure_nat():
-
-    try:
-
-        if CONFIG["nat_enabled"]:
-
-            status = nat_backend.configure_nat()
-
-            success = status.get(
-                "enabled",
-                False,
-            )
-
-            message = (
-                "NAT enabled."
-            )
-
-        else:
-
-            nat_backend.disable_nat()
-
-            success = True
-
-            message = (
-                "NAT disabled."
-            )
-
-        add_log(message)
-
-        return success
-
-    except Exception as exc:
-
-        add_log(
-            f"NAT configuration failed: {exc}"
-        )
-
-        return False
-
-
-# ============================================================
-# DHCP
-# ============================================================
-
-def configure_dhcp():
-
-    cfg = _current_backend_config()
-
-    dhcp_cfg = dict(
-        cfg["dhcp"]
-    )
-
-    dhcp_cfg["interface"] = (
-        cfg["network"]["lan_interface"]
-    )
-
-    dhcp_cfg["address"] = (
-        cfg["network"]["lan_address"]
-        .split("/")[0]
-    )
-
-    try:
-
-        if CONFIG["dhcp_enabled"]:
-
-            success = (
-                dhcp_backend.configure_dhcp(
-                    dhcp_cfg
-                )
-            )
-
-            message = "DHCP enabled."
-
-        else:
-
-            result = subprocess.run(
-                [
-                    "systemctl",
-                    "stop",
-                    "dnsmasq",
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-
-            success = (
-                result.returncode == 0
-            )
-
-            message = "DHCP disabled."
-
-        add_log(message)
-
-        return success
-
-    except Exception as exc:
-
-        add_log(
-            f"DHCP configuration failed: {exc}"
-        )
-
-        return False
-
-
-# ============================================================
-# DNS
-# ============================================================
-
-def configure_dns():
-
-    cfg = _current_backend_config()
-
-    servers = cfg["dns"].get(
-        "upstream_servers",
-        ["1.1.1.1"],
-    )
-
-    try:
-
-        if CONFIG["dns_enabled"]:
-
-            dns_backend.set_upstream_servers(
-                servers
-            )
-
-            success = True
-            message = "DNS enabled."
-
-        else:
-
-            # Do not stop dnsmasq here if DHCP is
-            # still enabled.
-            success = True
-            message = "DNS disabled."
-
-        add_log(message)
-
-        return success
-
-    except Exception as exc:
-
-        add_log(
-            f"DNS configuration failed: {exc}"
-        )
-
-        return False
-
-
-# ============================================================
-# Firewall
-# ============================================================
-
-def configure_firewall():
-
-    cfg = _current_backend_config()
-
-    lan = cfg["network"][
-        "lan_interface"
-    ]
-
-    wan = cfg["network"][
-        "wan_interface"
-    ]
-
-    try:
-
-        if CONFIG["firewall_enabled"]:
-
-            firewall_backend.save_ruleset(
-                lan,
-                wan,
-            )
-
-            success = (
-                firewall_backend
-                .apply_firewall_rules(
-                    lan,
-                    wan,
-                )
-            )
-
-            message = "Firewall enabled."
-
-        else:
-
-            success = True
-
-            message = "Firewall disabled."
-
-        add_log(message)
-
-        return success
-
-    except Exception as exc:
-
-        add_log(
-            f"Firewall configuration failed: {exc}"
-        )
-
-        return False
-
-
-# ============================================================
-# VPN
-# ============================================================
-
-def configure_vpn():
-
-    add_log(
-        "VPN configuration updated."
-    )
-
-    return True
-
-
-# ============================================================
-# System metrics
-# ============================================================
-
-def get_cpu_usage():
-    """
-    Calculate CPU utilization from /proc/stat.
+    Execute a system command.
     """
 
     try:
-
-        def read_cpu():
-
-            with open(
-                "/proc/stat",
-                "r",
-                encoding="utf-8",
-            ) as file:
-
-                line = file.readline()
-
-            values = list(
-                map(
-                    int,
-                    line.split()[1:],
-                )
-            )
-
-            idle = values[3]
-            total = sum(values)
-
-            return idle, total
-
-        idle1, total1 = read_cpu()
-
-        time.sleep(0.1)
-
-        idle2, total2 = read_cpu()
-
-        idle_delta = idle2 - idle1
-        total_delta = total2 - total1
-
-        if total_delta <= 0:
-            return 0
-
-        usage = (
-            100
-            * (1 - idle_delta / total_delta)
+        return subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
         )
 
-        return round(
-            max(0, min(100, usage)),
-            1,
-        )
-
-    except Exception:
-        return 0
+    except (
+        OSError,
+        subprocess.TimeoutExpired,
+    ):
+        return None
 
 
-def get_memory_usage():
+def get_local_ip(interface):
+    """
+    Return the IPv4 address of an interface.
+    """
 
-    try:
-
-        values = {}
-
-        with open(
-            "/proc/meminfo",
-            "r",
-            encoding="utf-8",
-        ) as file:
-
-            for line in file:
-
-                parts = line.split()
-
-                if len(parts) >= 2:
-
-                    values[
-                        parts[0].rstrip(":")
-                    ] = int(parts[1])
-
-        total = values.get(
-            "MemTotal",
-            0,
-        )
-
-        available = values.get(
-            "MemAvailable",
-            0,
-        )
-
-        if total == 0:
-            return 0
-
-        used = total - available
-
-        return round(
-            used / total * 100,
-            1,
-        )
-
-    except Exception:
-        return 0
-
-
-def get_temperature():
-
-    paths = [
-        "/sys/class/thermal/"
-        "thermal_zone0/temp",
-    ]
-
-    for path in paths:
-
-        try:
-
-            with open(
-                path,
-                "r",
-                encoding="utf-8",
-            ) as file:
-
-                value = int(
-                    file.read().strip()
-                )
-
-            return round(
-                value / 1000,
-                1,
-            )
-
-        except Exception:
-            continue
-
-    return None
-
-
-def get_uptime():
-
-    try:
-
-        with open(
-            "/proc/uptime",
-            "r",
-            encoding="utf-8",
-        ) as file:
-
-            seconds = float(
-                file.read().split()[0]
-            )
-
-        days = int(
-            seconds // 86400
-        )
-
-        hours = int(
-            seconds % 86400 // 3600
-        )
-
-        minutes = int(
-            seconds % 3600 // 60
-        )
-
-        if days:
-
-            return (
-                f"{days}d "
-                f"{hours}h "
-                f"{minutes}m"
-            )
-
-        return (
-            f"{hours}h "
-            f"{minutes}m"
-        )
-
-    except Exception:
-        return "Unknown"
-
-
-# ============================================================
-# Network traffic
-# ============================================================
-
-def get_interface_stats(interface):
-
-    try:
-
-        rx_path = (
-            "/sys/class/net/"
-            f"{interface}/statistics/rx_bytes"
-        )
-
-        tx_path = (
-            "/sys/class/net/"
-            f"{interface}/statistics/tx_bytes"
-        )
-
-        with open(
-            rx_path,
-            "r",
-            encoding="utf-8",
-        ) as file:
-
-            rx = int(file.read())
-
-        with open(
-            tx_path,
-            "r",
-            encoding="utf-8",
-        ) as file:
-
-            tx = int(file.read())
-
-        return {
-            "rx": rx,
-            "tx": tx,
-        }
-
-    except Exception:
-
-        return {
-            "rx": 0,
-            "tx": 0,
-        }
+    return monitoring.get_interface_ip(
+        interface
+    )
 
 
 def format_bytes(value):
+    """
+    Human-readable byte formatting.
+    """
 
-    if value < 1024:
-        return f"{value} B"
+    return monitoring.format_bytes(
+        value
+    )
 
-    if value < 1024 ** 2:
-        return f"{value / 1024:.1f} KB"
 
-    if value < 1024 ** 3:
-        return f"{value / 1024 ** 2:.1f} MB"
+def format_timestamp(timestamp):
+    """
+    Convert a Unix timestamp into a readable
+    local date/time.
+    """
 
-    return f"{value / 1024 ** 3:.2f} GB"
+    if timestamp in (
+        None,
+        "",
+        0,
+        "0",
+    ):
+        return "N/A"
+
+    try:
+        return datetime.fromtimestamp(
+            float(timestamp)
+        ).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+
+    except (
+        ValueError,
+        TypeError,
+        OSError,
+    ):
+        return "N/A"
 
 
 # ============================================================
-# Connected devices
+# DHCP / Device Discovery
 # ============================================================
 
 def get_dhcp_leases():
+    """
+    Read dnsmasq DHCP lease information.
 
-    leases = []
+    Returns:
+        {
+            ip: {
+                hostname,
+                mac,
+                expiry,
+                connected
+            }
+        }
+    """
 
     lease_files = [
         "/var/lib/misc/dnsmasq.leases",
@@ -725,12 +190,13 @@ def get_dhcp_leases():
     for path in lease_files:
 
         if os.path.exists(path):
-
             lease_file = path
             break
 
-    if not lease_file:
-        return leases
+    if lease_file is None:
+        return {}
+
+    leases = {}
 
     try:
 
@@ -752,674 +218,423 @@ def get_dhcp_leases():
                 ip = parts[2]
                 hostname = parts[3]
 
-                if hostname == "*":
-                    hostname = "Unknown device"
+                leases[ip] = {
+                    "hostname": (
+                        hostname
+                        if hostname != "*"
+                        else "Unknown"
+                    ),
+                    "ip": ip,
+                    "mac": mac,
+                    "expiry": expiry,
+                    "expiry_text":
+                        format_timestamp(
+                            expiry
+                        ),
+                    "connected": True,
+                    "interface": "wlan0",
+                }
 
-                leases.append(
-                    {
-                        "expiry": expiry,
-                        "mac": mac,
-                        "ip": ip,
-                        "hostname": hostname,
-                        "connected": True,
-                    }
-                )
-
-    except Exception:
-        pass
+    except (
+        OSError,
+        ValueError,
+    ):
+        return {}
 
     return leases
 
 
 def get_arp_devices():
+    """
+    Return devices currently visible through
+    the LAN interface.
+    """
 
-    devices = []
+    network = get_network_config()
 
-    output = run_command(
+    lan_interface = network.get(
+        "lan_interface",
+        "wlan0",
+    )
+
+    result = run_command(
         [
             "ip",
             "neigh",
             "show",
             "dev",
-            CONFIG["lan_interface"],
+            lan_interface,
         ]
     )
 
-    for line in output.splitlines():
+    if result is None:
+        return {}
+
+    devices = {}
+
+    for line in result.stdout.splitlines():
 
         parts = line.split()
 
-        if len(parts) < 4:
+        if not parts:
             continue
 
         ip = parts[0]
 
-        state = parts[-1]
+        if not ipaddress.ip_address(ip).version == 4:
+            continue
 
-        mac = ""
+        mac = None
+        state = "unknown"
 
-        if "lladdr" in parts:
+        for index, value in enumerate(parts):
 
-            index = parts.index(
-                "lladdr"
-            )
-
-            if index + 1 < len(parts):
+            if value == "lladdr" and index + 1 < len(parts):
                 mac = parts[index + 1]
 
-        devices.append(
-            {
-                "ip": ip,
-                "mac": mac,
-                "state": state,
-            }
-        )
+            if value in (
+                "REACHABLE",
+                "STALE",
+                "DELAY",
+                "PROBE",
+                "FAILED",
+                "INCOMPLETE",
+            ):
+                state = value.lower()
+
+        devices[ip] = {
+            "ip": ip,
+            "mac": mac,
+            "state": state,
+            "connected": state not in (
+                "failed",
+                "incomplete",
+            ),
+        }
 
     return devices
 
 
 def get_connected_devices():
+    """
+    Combine DHCP lease information with ARP
+    information.
+    """
 
     leases = get_dhcp_leases()
     arp = get_arp_devices()
 
-    arp_by_ip = {
-        item["ip"]: item
-        for item in arp
-    }
+    devices = {}
 
-    devices = []
-
-    for lease in leases:
-
-        arp_info = arp_by_ip.get(
-            lease["ip"],
-            {},
-        )
-
-        state = arp_info.get(
-            "state",
-            "UNKNOWN",
-        )
-
-        connected = state not in {
-            "FAILED",
-            "INCOMPLETE",
-        }
+    for ip, lease in leases.items():
 
         device = dict(lease)
 
-        device["connected"] = connected
+        if ip in arp:
 
-        if not device["mac"]:
-            device["mac"] = (
-                arp_info.get(
-                    "mac",
-                    "",
+            arp_device = arp[ip]
+
+            if arp_device.get("mac"):
+                device["mac"] = (
+                    arp_device["mac"]
+                )
+
+            device["state"] = (
+                arp_device.get(
+                    "state",
+                    "unknown",
                 )
             )
 
-        devices.append(device)
-
-    # Add ARP devices not present in DHCP leases.
-    known_ips = {
-        device["ip"]
-        for device in devices
-    }
-
-    for item in arp:
-
-        if item["ip"] in known_ips:
-            continue
-
-        if item["state"] in {
-            "FAILED",
-            "INCOMPLETE",
-        }:
-            continue
-
-        devices.append(
-            {
-                "expiry": "",
-                "mac": item["mac"],
-                "ip": item["ip"],
-                "hostname": "Unknown device",
-                "connected": True,
-            }
-        )
-
-    return devices
-
-
-# ============================================================
-# Internet connectivity
-# ============================================================
-
-def internet_available():
-
-    result = subprocess.run(
-        [
-            "ping",
-            "-c",
-            "1",
-            "-W",
-            "2",
-            "1.1.1.1",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    return result.returncode == 0
-
-
-# ============================================================
-# Dashboard data
-# ============================================================
-
-def get_service_status():
-
-    return {
-        "dhcp": service_active(
-            "dnsmasq"
-        )
-        and CONFIG["dhcp_enabled"],
-
-        "dns": (
-            CONFIG["dns_enabled"]
-        ),
-
-        "nat": (
-            nat_backend.get_nat_status()
-            .get(
-                "enabled",
-                False,
-            )
-        ),
-
-        "firewall": (
-            CONFIG["firewall_enabled"]
-        ),
-
-        "vpn": (
-            CONFIG["vpn_enabled"]
-        ),
-    }
-
-
-def get_dashboard_data():
-
-    devices = get_connected_devices()
-
-    wan_stats = get_interface_stats(
-        CONFIG["interface"]
-    )
-
-    lan_stats = get_interface_stats(
-        CONFIG["lan_interface"]
-    )
-
-    return {
-        "timestamp": datetime.now().isoformat(),
-
-        "system": {
-            "cpu": get_cpu_usage(),
-            "memory": get_memory_usage(),
-            "temperature": get_temperature(),
-            "uptime": get_uptime(),
-        },
-
-        "network": {
-            "wan_interface": CONFIG[
-                "interface"
-            ],
-
-            "lan_interface": CONFIG[
-                "lan_interface"
-            ],
-
-            "wan_ip": get_interface_ip(
-                CONFIG["interface"]
-            ),
-
-            "lan_ip": get_interface_ip(
-                CONFIG["lan_interface"]
-            ),
-
-            "internet": internet_available(),
-
-            "wan_rx": format_bytes(
-                wan_stats["rx"]
-            ),
-
-            "wan_tx": format_bytes(
-                wan_stats["tx"]
-            ),
-
-            "lan_rx": format_bytes(
-                lan_stats["rx"]
-            ),
-
-            "lan_tx": format_bytes(
-                lan_stats["tx"]
-            ),
-        },
-
-        "devices": devices,
-
-        "services": get_service_status(),
-
-        "logs": LOGS[:10],
-    }
-
-
-def get_interface_ip(interface):
-
-    output = run_command(
-        [
-            "ip",
-            "-4",
-            "-o",
-            "addr",
-            "show",
-            interface,
-        ]
-    )
-
-    for line in output.splitlines():
-
-        parts = line.split()
-
-        if "inet" in parts:
-
-            index = parts.index(
-                "inet"
+            device["connected"] = (
+                arp_device.get(
+                    "connected",
+                    True,
+                )
             )
 
-            if index + 1 < len(parts):
+        devices[ip] = device
 
-                return parts[
-                    index + 1
-                ].split("/")[0]
+    # Include devices that appear in ARP
+    # but do not have a DHCP lease.
+    for ip, arp_device in arp.items():
 
-    return "N/A"
+        if ip in devices:
+            continue
+
+        devices[ip] = {
+            "hostname": "Unknown",
+            "ip": ip,
+            "mac": arp_device.get(
+                "mac"
+            ),
+            "expiry": None,
+            "expiry_text": "N/A",
+            "connected":
+                arp_device.get(
+                    "connected",
+                    False,
+                ),
+            "state":
+                arp_device.get(
+                    "state",
+                    "unknown",
+                ),
+            "interface":
+                get_network_config().get(
+                    "lan_interface",
+                    "wlan0",
+                ),
+        }
+
+    # Add traffic information where possible.
+    for ip, device in devices.items():
+
+        device.setdefault(
+            "rx_bytes",
+            None,
+        )
+
+        device.setdefault(
+            "tx_bytes",
+            None,
+        )
+
+        device["rx_human"] = format_bytes(
+            device["rx_bytes"]
+        )
+
+        device["tx_human"] = format_bytes(
+            device["tx_bytes"]
+        )
+
+    return list(
+        devices.values()
+    )
+
+
+# ============================================================
+# Services
+# ============================================================
+
+def service_active(service):
+    """
+    Return True if a systemd service is active.
+    """
+
+    status = monitoring.get_service_status(
+        service
+    )
+
+    return status == "active"
+
+
+def get_service_statuses():
+    """
+    Return the services displayed on the
+    dashboard.
+    """
+
+    nat_status = nat_backend.get_nat_status()
+
+    return {
+        "dhcp": {
+            "enabled":
+                service_active(
+                    "dnsmasq.service"
+                ),
+            "label": "DHCP",
+        },
+
+        "dns": {
+            "enabled":
+                service_active(
+                    "dnsmasq.service"
+                ),
+            "label": "DNS",
+        },
+
+        "nat": {
+            "enabled":
+                bool(
+                    nat_status.get(
+                        "enabled",
+                        False,
+                    )
+                ),
+            "label": "NAT",
+        },
+
+        "firewall": {
+            "enabled":
+                get_firewall_enabled(),
+            "label": "Firewall",
+        },
+
+        "vpn": {
+            "enabled":
+                monitoring.get_vpn_status()
+                == "active",
+            "label": "VPN",
+        },
+    }
+
+
+def get_firewall_enabled():
+    """
+    Determine current firewall state.
+    """
+
+    if firewall_backend is None:
+        return False
+
+    try:
+
+        status = (
+            firewall_backend
+            .get_firewall_status()
+        )
+
+        if isinstance(
+            status,
+            dict,
+        ):
+            return bool(
+                status.get(
+                    "enabled",
+                    False,
+                )
+            )
+
+        if isinstance(
+            status,
+            bool,
+        ):
+            return status
+
+        return str(
+            status
+        ).lower() in (
+            "active",
+            "enabled",
+            "running",
+            "true",
+        )
+
+    except (
+        AttributeError,
+        OSError,
+        RuntimeError,
+    ):
+        return False
+
+
+# ============================================================
+# NAT Controls
+# ============================================================
+
+def enable_nat():
+    """
+    Enable NAT using the PiServer NAT backend.
+    """
+
+    return nat_backend.configure_nat()
+
+
+def disable_nat():
+    """
+    Disable NAT using the PiServer NAT backend.
+    """
+
+    return nat_backend.disable_nat()
 
 
 # ============================================================
 # Dashboard
 # ============================================================
 
-@app.route("/")
-def dashboard():
+def get_dashboard_data():
+    """
+    Build the complete dashboard data structure.
+    """
 
-    data = get_dashboard_data()
+    network = get_network_config()
 
-    return render_template_string(
-        HTML,
-        page="dashboard",
-        config=CONFIG,
-        dashboard=data,
-        logs=LOGS,
-        health=None,
+    wan_interface = network.get(
+        "wan_interface",
+        "eth0",
     )
 
-
-# ============================================================
-# Dashboard API
-# ============================================================
-
-@app.route("/api/dashboard")
-def dashboard_api():
-
-    return jsonify(
-        get_dashboard_data()
+    lan_interface = network.get(
+        "lan_interface",
+        "wlan0",
     )
 
-
-# ============================================================
-# Network
-# ============================================================
-
-@app.route(
-    "/network",
-    methods=["GET", "POST"],
-)
-def network():
-
-    if request.method == "POST":
-
-        CONFIG["hostname"] = request.form.get(
-            "hostname",
-            CONFIG["hostname"],
+    metrics = (
+        monitoring.get_dashboard_metrics(
+            wan_interface=wan_interface,
+            lan_interface=lan_interface,
         )
-
-        CONFIG["interface"] = request.form.get(
-            "interface",
-            CONFIG["interface"],
-        )
-
-        CONFIG["lan_interface"] = request.form.get(
-            "lan_interface",
-            CONFIG["lan_interface"],
-        )
-
-        CONFIG["mode"] = request.form.get(
-            "mode",
-            CONFIG["mode"],
-        )
-
-        CONFIG["ip_address"] = request.form.get(
-            "ip_address",
-            CONFIG["ip_address"],
-        )
-
-        CONFIG["gateway"] = request.form.get(
-            "gateway",
-            CONFIG["gateway"],
-        )
-
-        CONFIG["netmask"] = request.form.get(
-            "netmask",
-            CONFIG["netmask"],
-        )
-
-        CONFIG["dns"] = request.form.get(
-            "dns",
-            CONFIG["dns"],
-        )
-
-        CONFIG["nat_enabled"] = (
-            request.form.get(
-                "nat_enabled"
-            )
-            == "on"
-        )
-
-        configure_network()
-
-        configure_nat()
-
-        add_log(
-            "Network settings saved."
-        )
-
-        return redirect(
-            url_for("network")
-        )
-
-    return render_template_string(
-        HTML,
-        page="network",
-        config=CONFIG,
-        dashboard=get_dashboard_data(),
-        logs=LOGS,
-        health=None,
-        network_status=(
-            update_network_status()
-        ),
     )
-
-
-# ============================================================
-# Save network
-# ============================================================
-
-def configure_network():
-
-    try:
-
-        cfg = _current_backend_config()
-
-        gateway_config.save_config(
-            cfg
-        )
-
-        return True
-
-    except Exception as exc:
-
-        add_log(
-            f"Network save failed: {exc}"
-        )
-
-        return False
-
-
-# ============================================================
-# DHCP
-# ============================================================
-
-@app.route(
-    "/dhcp",
-    methods=["GET", "POST"],
-)
-def dhcp():
-
-    if request.method == "POST":
-
-        CONFIG["dhcp_enabled"] = (
-            request.form.get(
-                "dhcp_enabled"
-            )
-            == "on"
-        )
-
-        configure_dhcp()
-
-        return redirect(
-            url_for("dhcp")
-        )
-
-    return render_template_string(
-        HTML,
-        page="dhcp",
-        config=CONFIG,
-        dashboard=get_dashboard_data(),
-        logs=LOGS,
-        health=None,
-    )
-
-
-# ============================================================
-# DNS
-# ============================================================
-
-@app.route(
-    "/dns",
-    methods=["GET", "POST"],
-)
-def dns():
-
-    if request.method == "POST":
-
-        CONFIG["dns_enabled"] = (
-            request.form.get(
-                "dns_enabled"
-            )
-            == "on"
-        )
-
-        configure_dns()
-
-        return redirect(
-            url_for("dns")
-        )
-
-    return render_template_string(
-        HTML,
-        page="dns",
-        config=CONFIG,
-        dashboard=get_dashboard_data(),
-        logs=LOGS,
-        health=None,
-    )
-
-
-# ============================================================
-# Firewall
-# ============================================================
-
-@app.route(
-    "/firewall",
-    methods=["GET", "POST"],
-)
-def firewall():
-
-    if request.method == "POST":
-
-        CONFIG["firewall_enabled"] = (
-            request.form.get(
-                "firewall_enabled"
-            )
-            == "on"
-        )
-
-        configure_firewall()
-
-        return redirect(
-            url_for("firewall")
-        )
-
-    return render_template_string(
-        HTML,
-        page="firewall",
-        config=CONFIG,
-        dashboard=get_dashboard_data(),
-        logs=LOGS,
-        health=None,
-    )
-
-
-# ============================================================
-# VPN
-# ============================================================
-
-@app.route(
-    "/vpn",
-    methods=["GET", "POST"],
-)
-def vpn():
-
-    if request.method == "POST":
-
-        CONFIG["vpn_enabled"] = (
-            request.form.get(
-                "vpn_enabled"
-            )
-            == "on"
-        )
-
-        configure_vpn()
-
-        return redirect(
-            url_for("vpn")
-        )
-
-    return render_template_string(
-        HTML,
-        page="vpn",
-        config=CONFIG,
-        dashboard=get_dashboard_data(),
-        logs=LOGS,
-        health=None,
-    )
-
-
-# ============================================================
-# Monitoring
-# ============================================================
-
-@app.route("/monitoring")
-def monitoring_page():
-
-    try:
-        health = monitoring.get_gateway_health()
-    except Exception as exc:
-        health = {
-            "error": str(exc)
-        }
-
-    return render_template_string(
-        HTML,
-        page="monitoring",
-        config=CONFIG,
-        dashboard=get_dashboard_data(),
-        logs=LOGS,
-        health=health,
-    )
-
-
-@app.route("/api/monitoring")
-def monitoring_api():
-
-    try:
-        health = monitoring.get_gateway_health()
-    except Exception as exc:
-        health = {
-            "error": str(exc)
-        }
-
-    return jsonify(health)
-
-
-# ============================================================
-# Device details
-# ============================================================
-
-@app.route("/device/<ip>")
-def device_details(ip):
 
     devices = get_connected_devices()
 
-    device = next(
-        (
-            item
-            for item in devices
-            if item["ip"] == ip
+    return {
+        "system": metrics.get(
+            "system",
+            {},
         ),
-        None,
-    )
 
-    if device is None:
+        "network": metrics.get(
+            "network",
+            {},
+        ),
 
-        return (
-            "Device not found",
-            404,
-        )
+        "devices": devices,
 
-    return render_template_string(
-        DEVICE_HTML,
-        device=device,
-        config=CONFIG,
-    )
+        "services":
+            get_service_statuses(),
 
+        "vpn": metrics.get(
+            "vpn",
+            {},
+        ),
 
-# ============================================================
-# Logs
-# ============================================================
+        "dns": metrics.get(
+            "dns",
+            {},
+        ),
 
-@app.route("/logs")
-def logs():
+        "dhcp": metrics.get(
+            "dhcp",
+            {},
+        ),
 
-    return render_template_string(
-        HTML,
-        page="logs",
-        config=CONFIG,
-        dashboard=get_dashboard_data(),
-        logs=LOGS,
-        health=None,
-    )
+        "firewall": metrics.get(
+            "firewall",
+            {},
+        ),
+
+        "nat": metrics.get(
+            "nat",
+            {},
+        ),
+
+        "timestamp":
+            metrics.get(
+                "timestamp",
+                time.time(),
+            ),
+    }
 
 
 # ============================================================
 # Dashboard HTML
 # ============================================================
 
-HTML = r"""
+DASHBOARD_TEMPLATE = """
 <!DOCTYPE html>
-<html lang="en">
-
+<html>
 <head>
 
 <meta charset="UTF-8">
@@ -1429,7 +644,7 @@ HTML = r"""
     content="width=device-width, initial-scale=1.0"
 >
 
-<title>PiServer</title>
+<title>PiServer Dashboard</title>
 
 <style>
 
@@ -1439,13 +654,13 @@ HTML = r"""
 
 body {
     margin: 0;
+    background: #0f1115;
+    color: #f1f1f1;
     font-family:
         -apple-system,
         BlinkMacSystemFont,
         "Segoe UI",
         sans-serif;
-    background: #f4f6f8;
-    color: #1f2937;
 }
 
 .sidebar {
@@ -1453,42 +668,42 @@ body {
     left: 0;
     top: 0;
     bottom: 0;
-    width: 230px;
-    background: #111827;
-    color: white;
-    padding: 22px 14px;
+    width: 220px;
+    background: #171a21;
+    border-right: 1px solid #282c35;
+    padding: 24px 16px;
 }
 
 .logo {
-    font-size: 23px;
+    font-size: 24px;
     font-weight: 700;
-    padding: 0 12px 25px;
+    margin-bottom: 30px;
 }
 
 .logo span {
-    font-size: 12px;
-    color: #9ca3af;
+    font-size: 13px;
+    color: #888;
     display: block;
-    margin-top: 3px;
+    margin-top: 4px;
 }
 
 .nav a {
     display: block;
-    color: #d1d5db;
-    text-decoration: none;
-    padding: 11px 12px;
+    padding: 12px 14px;
+    margin-bottom: 6px;
     border-radius: 8px;
-    margin-bottom: 4px;
+    color: #bbb;
+    text-decoration: none;
 }
 
 .nav a:hover,
 .nav a.active {
-    background: #374151;
+    background: #252a34;
     color: white;
 }
 
 .main {
-    margin-left: 230px;
+    margin-left: 220px;
     padding: 28px;
 }
 
@@ -1496,7 +711,7 @@ body {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 25px;
+    margin-bottom: 24px;
 }
 
 .header h1 {
@@ -1505,181 +720,152 @@ body {
 }
 
 .status {
-    padding: 8px 13px;
+    padding: 8px 12px;
     border-radius: 20px;
-    background: #dcfce7;
-    color: #166534;
-    font-size: 14px;
-    font-weight: 600;
+    font-size: 13px;
+    background: #252a34;
 }
 
 .grid {
     display: grid;
     grid-template-columns:
-        repeat(4, minmax(0, 1fr));
+        repeat(
+            auto-fit,
+            minmax(220px, 1fr)
+        );
     gap: 16px;
-    margin-bottom: 18px;
+    margin-bottom: 20px;
 }
 
 .card {
-    background: white;
-    border-radius: 13px;
+    background: #171a21;
+    border: 1px solid #282c35;
+    border-radius: 12px;
     padding: 20px;
-    box-shadow:
-        0 1px 3px rgba(0,0,0,.08);
 }
 
-.metric-label {
-    color: #6b7280;
-    font-size: 13px;
-    margin-bottom: 8px;
+.card h3 {
+    margin-top: 0;
+    color: #aaa;
+    font-size: 14px;
+    font-weight: 500;
 }
 
 .metric {
-    font-size: 28px;
+    font-size: 30px;
     font-weight: 700;
+    margin-top: 8px;
 }
 
-.metric-small {
+.sub {
+    color: #888;
     font-size: 13px;
-    color: #6b7280;
     margin-top: 5px;
-}
-
-.two-column {
-    display: grid;
-    grid-template-columns:
-        2fr 1fr;
-    gap: 18px;
-    margin-bottom: 18px;
-}
-
-.section-title {
-    font-size: 18px;
-    font-weight: 700;
-    margin-bottom: 15px;
-}
-
-.device {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 13px 0;
-    border-bottom: 1px solid #e5e7eb;
-}
-
-.device:last-child {
-    border-bottom: none;
-}
-
-.device-name {
-    font-weight: 600;
-}
-
-.device-ip {
-    color: #6b7280;
-    font-size: 13px;
-    margin-top: 3px;
-}
-
-.device-status {
-    font-size: 12px;
-    color: #166534;
-}
-
-.device-link {
-    color: inherit;
-    text-decoration: none;
 }
 
 .service {
     display: flex;
     justify-content: space-between;
+    align-items: center;
     padding: 12px 0;
-    border-bottom: 1px solid #e5e7eb;
+    border-bottom: 1px solid #282c35;
 }
 
 .service:last-child {
     border-bottom: none;
 }
 
+.dot {
+    display: inline-block;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    margin-right: 7px;
+    background: #666;
+}
+
+.dot.active {
+    background: #55d17a;
+}
+
+.dot.inactive {
+    background: #d65c5c;
+}
+
+.device {
+    display: grid;
+    grid-template-columns:
+        1.3fr
+        1fr
+        1.4fr
+        1fr
+        1fr;
+    gap: 10px;
+    align-items: center;
+    padding: 14px 8px;
+    border-bottom: 1px solid #282c35;
+}
+
+.device:last-child {
+    border-bottom: none;
+}
+
+.device a {
+    color: white;
+    text-decoration: none;
+}
+
+.device a:hover {
+    text-decoration: underline;
+}
+
+.table-header {
+    color: #777;
+    font-size: 12px;
+    text-transform: uppercase;
+}
+
+.badge {
+    display: inline-block;
+    padding: 4px 8px;
+    border-radius: 6px;
+    background: #252a34;
+    font-size: 12px;
+}
+
 .online {
-    color: #16a34a;
-    font-weight: 600;
+    color: #65d985;
 }
 
 .offline {
-    color: #dc2626;
-    font-weight: 600;
+    color: #d96868;
 }
 
-.activity {
-    padding: 11px 0;
-    border-bottom: 1px solid #e5e7eb;
-    font-size: 14px;
-}
-
-.activity-time {
-    color: #9ca3af;
-    font-size: 12px;
-    margin-right: 8px;
-}
-
-.network-box {
-    display: grid;
-    grid-template-columns:
-        repeat(2, 1fr);
-    gap: 12px;
-}
-
-.network-item {
-    background: #f9fafb;
-    padding: 13px;
-    border-radius: 8px;
-}
-
-.network-item strong {
-    display: block;
-    margin-bottom: 4px;
-}
-
-.settings {
-    display: flex;
-    gap: 10px;
-    flex-wrap: wrap;
-}
-
-.btn {
-    border: none;
-    border-radius: 8px;
-    padding: 10px 15px;
-    cursor: pointer;
-    background: #111827;
+.button {
+    background: #252a34;
+    border: 1px solid #3a404c;
     color: white;
+    padding: 8px 12px;
+    border-radius: 7px;
+    cursor: pointer;
 }
 
-.btn:hover {
-    background: #374151;
+.button:hover {
+    background: #303642;
 }
 
-@media(max-width: 1000px) {
-
-    .grid {
-        grid-template-columns:
-            repeat(2, 1fr);
-    }
-
-    .two-column {
-        grid-template-columns: 1fr;
-    }
-
+.footer {
+    color: #666;
+    font-size: 12px;
+    margin-top: 24px;
 }
 
-@media(max-width: 700px) {
+@media (max-width: 800px) {
 
     .sidebar {
         position: static;
         width: 100%;
+        height: auto;
     }
 
     .main {
@@ -1687,8 +873,9 @@ body {
         padding: 16px;
     }
 
-    .grid {
-        grid-template-columns: 1fr;
+    .device {
+        grid-template-columns:
+            1fr 1fr;
     }
 
 }
@@ -1697,9 +884,7 @@ body {
 
 </head>
 
-
 <body>
-
 
 <div class="sidebar">
 
@@ -1712,57 +897,36 @@ body {
 
         <a
             href="/"
-            class="{{ 'active' if page == 'dashboard' else '' }}"
+            class="active"
         >
             Dashboard
         </a>
 
-        <a
-            href="/network"
-            class="{{ 'active' if page == 'network' else '' }}"
-        >
+        <a href="/network">
             Network
         </a>
 
-        <a
-            href="/dhcp"
-            class="{{ 'active' if page == 'dhcp' else '' }}"
-        >
+        <a href="/dhcp">
             DHCP
         </a>
 
-        <a
-            href="/dns"
-            class="{{ 'active' if page == 'dns' else '' }}"
-        >
+        <a href="/dns">
             DNS
         </a>
 
-        <a
-            href="/firewall"
-            class="{{ 'active' if page == 'firewall' else '' }}"
-        >
+        <a href="/firewall">
             Firewall
         </a>
 
-        <a
-            href="/vpn"
-            class="{{ 'active' if page == 'vpn' else '' }}"
-        >
+        <a href="/vpn">
             VPN
         </a>
 
-        <a
-            href="/monitoring"
-            class="{{ 'active' if page == 'monitoring' else '' }}"
-        >
+        <a href="/monitoring">
             Monitoring
         </a>
 
-        <a
-            href="/logs"
-            class="{{ 'active' if page == 'logs' else '' }}"
-        >
+        <a href="/logs">
             Logs
         </a>
 
@@ -1773,418 +937,365 @@ body {
 
 <div class="main">
 
+    <div class="header">
 
-{% if page == "dashboard" %}
-
-
-<div class="header">
-
-    <div>
         <h1>Dashboard</h1>
-        <div class="metric-small">
-            {{ config.hostname }}
+
+        <div class="status">
+            <span
+                class="dot active"
+                id="gateway-dot"
+            ></span>
+
+            PiServer Online
         </div>
+
     </div>
 
-    <div
-        id="gateway-status"
-        class="status"
-    >
-        ● Gateway Online
+
+    <!-- SYSTEM -->
+
+    <div class="grid">
+
+        <div class="card">
+
+            <h3>CPU Usage</h3>
+
+            <div
+                class="metric"
+                id="cpu"
+            >
+                --
+            </div>
+
+            <div class="sub">
+                Processor utilization
+            </div>
+
+        </div>
+
+
+        <div class="card">
+
+            <h3>Memory</h3>
+
+            <div
+                class="metric"
+                id="memory"
+            >
+                --
+            </div>
+
+            <div class="sub">
+                RAM utilization
+            </div>
+
+        </div>
+
+
+        <div class="card">
+
+            <h3>Temperature</h3>
+
+            <div
+                class="metric"
+                id="temperature"
+            >
+                --
+            </div>
+
+            <div class="sub">
+                CPU temperature
+            </div>
+
+        </div>
+
+
+        <div class="card">
+
+            <h3>Storage</h3>
+
+            <div
+                class="metric"
+                id="storage"
+            >
+                --
+            </div>
+
+            <div class="sub">
+                Root filesystem
+            </div>
+
+        </div>
+
+
+        <div class="card">
+
+            <h3>Uptime</h3>
+
+            <div
+                class="metric"
+                id="uptime"
+            >
+                --
+            </div>
+
+            <div class="sub">
+                System uptime
+            </div>
+
+        </div>
+
     </div>
 
-</div>
+
+    <!-- NETWORK -->
+
+    <div class="grid">
+
+        <div class="card">
+
+            <h3>WAN</h3>
+
+            <div
+                class="metric"
+                id="wan-ip"
+            >
+                --
+            </div>
+
+            <div
+                class="sub"
+                id="wan-state"
+            >
+                --
+            </div>
+
+        </div>
 
 
-<!-- System metrics -->
+        <div class="card">
 
-<div class="grid">
+            <h3>LAN</h3>
+
+            <div
+                class="metric"
+                id="lan-ip"
+            >
+                --
+            </div>
+
+            <div
+                class="sub"
+                id="lan-state"
+            >
+                --
+            </div>
+
+        </div>
+
+
+        <div class="card">
+
+            <h3>Internet</h3>
+
+            <div
+                class="metric"
+                id="internet"
+            >
+                --
+            </div>
+
+            <div class="sub">
+                Connectivity test
+            </div>
+
+        </div>
+
+
+        <div class="card">
+
+            <h3>TCP Connections</h3>
+
+            <div
+                class="metric"
+                id="connections"
+            >
+                --
+            </div>
+
+            <div class="sub">
+                Active connections
+            </div>
+
+        </div>
+
+    </div>
+
+
+    <!-- SERVICES -->
 
     <div class="card">
 
-        <div class="metric-label">
-            CPU
-        </div>
+        <h3>Gateway Services</h3>
 
-        <div
-            class="metric"
-            id="cpu"
-        >
-            {{ dashboard.system.cpu }}%
-        </div>
+        <div class="service">
 
-        <div class="metric-small">
-            Processor usage
-        </div>
+            <span>
+                <span
+                    class="dot"
+                    id="dhcp-dot"
+                ></span>
 
-    </div>
+                DHCP
+            </span>
 
-
-    <div class="card">
-
-        <div class="metric-label">
-            Memory
-        </div>
-
-        <div
-            class="metric"
-            id="memory"
-        >
-            {{ dashboard.system.memory }}%
-        </div>
-
-        <div class="metric-small">
-            RAM utilization
-        </div>
-
-    </div>
-
-
-    <div class="card">
-
-        <div class="metric-label">
-            Temperature
-        </div>
-
-        <div
-            class="metric"
-            id="temperature"
-        >
-            {% if dashboard.system.temperature is not none %}
-                {{ dashboard.system.temperature }}°C
-            {% else %}
-                N/A
-            {% endif %}
-        </div>
-
-        <div class="metric-small">
-            Raspberry Pi CPU
-        </div>
-
-    </div>
-
-
-    <div class="card">
-
-        <div class="metric-label">
-            Uptime
-        </div>
-
-        <div
-            class="metric"
-            id="uptime"
-            style="font-size:23px"
-        >
-            {{ dashboard.system.uptime }}
-        </div>
-
-        <div class="metric-small">
-            System uptime
-        </div>
-
-    </div>
-
-</div>
-
-
-<!-- Network -->
-
-<div class="card">
-
-    <div class="section-title">
-        Network
-    </div>
-
-    <div class="network-box">
-
-        <div class="network-item">
-
-            <strong>
-                Internet
-            </strong>
-
-            <span id="internet">
-
-                {% if dashboard.network.internet %}
-                    <span class="online">
-                        ● Online
-                    </span>
-                {% else %}
-                    <span class="offline">
-                        ● Offline
-                    </span>
-                {% endif %}
-
+            <span
+                class="badge"
+                id="dhcp-status"
+            >
+                --
             </span>
 
         </div>
 
 
-        <div class="network-item">
-
-            <strong>
-                WAN
-            </strong>
-
-            {{ dashboard.network.wan_ip }}
-
-            <div class="metric-small">
-                {{ dashboard.network.wan_interface }}
-            </div>
-
-        </div>
-
-
-        <div class="network-item">
-
-            <strong>
-                LAN
-            </strong>
-
-            {{ dashboard.network.lan_ip }}
-
-            <div class="metric-small">
-                {{ dashboard.network.lan_interface }}
-            </div>
-
-        </div>
-
-
-        <div class="network-item">
-
-            <strong>
-                Traffic
-            </strong>
-
-            ↓ {{ dashboard.network.wan_rx }}
-            &nbsp;
-            ↑ {{ dashboard.network.wan_tx }}
-
-        </div>
-
-    </div>
-
-</div>
-
-
-<br>
-
-
-<div class="two-column">
-
-
-<!-- Connected devices -->
-
-<div class="card">
-
-    <div class="section-title">
-
-        Connected Devices
-
-        <span
-            id="device-count"
-            style="
-                float:right;
-                font-size:13px;
-                color:#6b7280;
-            "
-        >
-            {{ dashboard.devices|length }}
-        </span>
-
-    </div>
-
-
-    <div id="devices">
-
-    {% if dashboard.devices %}
-
-        {% for device in dashboard.devices %}
-
-        <a
-            class="device-link"
-            href="/device/{{ device.ip }}"
-        >
-
-            <div class="device">
-
-                <div>
-
-                    <div class="device-name">
-                        {{ device.hostname }}
-                    </div>
-
-                    <div class="device-ip">
-
-                        {{ device.ip }}
-
-                        {% if device.mac %}
-                            · {{ device.mac }}
-                        {% endif %}
-
-                    </div>
-
-                </div>
-
-                <div>
-
-                    {% if device.connected %}
-
-                        <div class="device-status">
-                            ● Connected
-                        </div>
-
-                    {% else %}
-
-                        <div class="offline">
-                            ● Offline
-                        </div>
-
-                    {% endif %}
-
-                </div>
-
-            </div>
-
-        </a>
-
-        {% endfor %}
-
-    {% else %}
-
-        <div class="metric-small">
-            No connected devices detected.
-        </div>
-
-    {% endif %}
-
-    </div>
-
-</div>
-
-
-<!-- Services -->
-
-<div class="card">
-
-    <div class="section-title">
-        Services
-    </div>
-
-
-    <div class="service">
-
-        DHCP
-
-        <span
-            id="service-dhcp"
-            class="{{ 'online' if dashboard.services.dhcp else 'offline' }}"
-        >
-            ●
-            {{ "ON" if dashboard.services.dhcp else "OFF" }}
-        </span>
-
-    </div>
-
-
-    <div class="service">
-
-        DNS
-
-        <span
-            id="service-dns"
-            class="{{ 'online' if dashboard.services.dns else 'offline' }}"
-        >
-            ●
-            {{ "ON" if dashboard.services.dns else "OFF" }}
-        </span>
-
-    </div>
-
-
-    <div class="service">
-
-        NAT
-
-        <span
-            id="service-nat"
-            class="{{ 'online' if dashboard.services.nat else 'offline' }}"
-        >
-            ●
-            {{ "ON" if dashboard.services.nat else "OFF" }}
-        </span>
-
-    </div>
-
-
-    <div class="service">
-
-        Firewall
-
-        <span
-            id="service-firewall"
-            class="{{ 'online' if dashboard.services.firewall else 'offline' }}"
-        >
-            ●
-            {{ "ON" if dashboard.services.firewall else "OFF" }}
-        </span>
-
-    </div>
-
-
-    <div class="service">
-
-        VPN
-
-        <span
-            id="service-vpn"
-            class="{{ 'online' if dashboard.services.vpn else 'offline' }}"
-        >
-            ●
-            {{ "ON" if dashboard.services.vpn else "OFF" }}
-        </span>
-
-    </div>
-
-</div>
-
-</div>
-
-
-<!-- Activity -->
-
-<div class="card">
-
-    <div class="section-title">
-        Recent Activity
-    </div>
-
-    <div id="activity">
-
-    {% if dashboard.logs %}
-
-        {% for log in dashboard.logs %}
-
-        <div class="activity">
-
-            <span class="activity-time">
-                {{ log.time }}
+        <div class="service">
+
+            <span>
+                <span
+                    class="dot"
+                    id="dns-dot"
+                ></span>
+
+                DNS
             </span>
 
-            {{ log.message }}
+            <span
+                class="badge"
+                id="dns-status"
+            >
+                --
+            </span>
 
         </div>
 
-        {% endfor %}
 
-    {% else %}
+        <div class="service">
 
-        <div class="metric-small">
-            No recent activity.
+            <span>
+                <span
+                    class="dot"
+                    id="nat-dot"
+                ></span>
+
+                NAT
+            </span>
+
+            <span
+                class="badge"
+                id="nat-status"
+            >
+                --
+            </span>
+
         </div>
 
-    {% endif %}
 
+        <div class="service">
+
+            <span>
+                <span
+                    class="dot"
+                    id="firewall-dot"
+                ></span>
+
+                Firewall
+            </span>
+
+            <span
+                class="badge"
+                id="firewall-status"
+            >
+                --
+            </span>
+
+        </div>
+
+
+        <div class="service">
+
+            <span>
+                <span
+                    class="dot"
+                    id="vpn-dot"
+                ></span>
+
+                VPN
+            </span>
+
+            <span
+                class="badge"
+                id="vpn-status"
+            >
+                --
+            </span>
+
+        </div>
+
+    </div>
+
+
+    <br>
+
+
+    <!-- DEVICES -->
+
+    <div class="card">
+
+        <h3>
+            Connected Devices
+            (<span id="device-count">0</span>)
+        </h3>
+
+        <div class="device table-header">
+
+            <div>
+                Hostname
+            </div>
+
+            <div>
+                IP
+            </div>
+
+            <div>
+                MAC
+            </div>
+
+            <div>
+                RX
+            </div>
+
+            <div>
+                TX
+            </div>
+
+        </div>
+
+        <div id="devices">
+
+            <div class="sub">
+                Loading devices...
+            </div>
+
+        </div>
+
+    </div>
+
+
+    <div class="footer">
+        PiServer automatically refreshes dashboard
+        metrics every 3 seconds.
     </div>
 
 </div>
@@ -2192,144 +1303,45 @@ body {
 
 <script>
 
-function updateDashboard() {
-
-    fetch("/api/dashboard")
-
-        .then(response => response.json())
-
-        .then(data => {
-
-            document.getElementById(
-                "cpu"
-            ).textContent =
-                data.system.cpu + "%";
-
-
-            document.getElementById(
-                "memory"
-            ).textContent =
-                data.system.memory + "%";
-
-
-            if (
-                data.system.temperature !== null
-            ) {
-
-                document.getElementById(
-                    "temperature"
-                ).textContent =
-                    data.system.temperature + "°C";
-
-            }
-
-
-            document.getElementById(
-                "uptime"
-            ).textContent =
-                data.system.uptime;
-
-
-            document.getElementById(
-                "device-count"
-            ).textContent =
-                data.devices.length;
-
-
-            const internet =
-                document.getElementById(
-                    "internet"
-                );
-
-
-            if (data.network.internet) {
-
-                internet.innerHTML =
-                    '<span class="online">● Online</span>';
-
-            } else {
-
-                internet.innerHTML =
-                    '<span class="offline">● Offline</span>';
-
-            }
-
-
-            updateService(
-                "service-dhcp",
-                data.services.dhcp
-            );
-
-            updateService(
-                "service-dns",
-                data.services.dns
-            );
-
-            updateService(
-                "service-nat",
-                data.services.nat
-            );
-
-            updateService(
-                "service-firewall",
-                data.services.firewall
-            );
-
-            updateService(
-                "service-vpn",
-                data.services.vpn
-            );
-
-
-            updateDevices(
-                data.devices
-            );
-
-        })
-
-        .catch(() => {
-
-            const status =
-                document.getElementById(
-                    "gateway-status"
-                );
-
-            status.textContent =
-                "● Dashboard Error";
-
-            status.style.background =
-                "#fee2e2";
-
-            status.style.color =
-                "#991b1b";
-
-        });
-
-}
-
-
-function updateService(
-    id,
+function setService(
+    service,
     enabled
 ) {
 
-    const element =
-        document.getElementById(id);
+    const dot =
+        document.getElementById(
+            service + "-dot"
+        );
 
-    element.textContent =
-        enabled
-            ? "● ON"
-            : "● OFF";
+    const status =
+        document.getElementById(
+            service + "-status"
+        );
 
-    element.className =
-        enabled
-            ? "online"
-            : "offline";
+    if (!dot || !status) {
+        return;
+    }
 
+    if (enabled) {
+
+        dot.className =
+            "dot active";
+
+        status.textContent =
+            "Active";
+
+    } else {
+
+        dot.className =
+            "dot inactive";
+
+        status.textContent =
+            "Inactive";
+    }
 }
 
 
-function updateDevices(
+function renderDevices(
     devices
 ) {
 
@@ -2338,143 +1350,264 @@ function updateDevices(
             "devices"
         );
 
+    const count =
+        document.getElementById(
+            "device-count"
+        );
+
+    count.textContent =
+        devices.length;
+
     if (!devices.length) {
 
         container.innerHTML =
-            '<div class="metric-small">' +
-            'No connected devices detected.' +
+            '<div class="sub">' +
+            'No connected devices' +
             '</div>';
 
         return;
-
     }
-
 
     container.innerHTML =
         devices.map(
-            device => {
+            function(device) {
 
-                const status =
-                    device.connected
-                        ? '<div class="device-status">● Connected</div>'
-                        : '<div class="offline">● Offline</div>';
+                const hostname =
+                    device.hostname ||
+                    "Unknown";
+
+                const ip =
+                    device.ip ||
+                    "--";
+
+                const mac =
+                    device.mac ||
+                    "--";
+
+                const rx =
+                    device.rx_human ||
+                    "--";
+
+                const tx =
+                    device.tx_human ||
+                    "--";
 
                 return `
-                    <a
-                        class="device-link"
-                        href="/device/${device.ip}"
-                    >
+                    <div class="device">
 
-                        <div class="device">
-
-                            <div>
-
-                                <div class="device-name">
-                                    ${escapeHtml(device.hostname)}
-                                </div>
-
-                                <div class="device-ip">
-                                    ${escapeHtml(device.ip)}
-                                    ${
-                                        device.mac
-                                            ? " · " +
-                                              escapeHtml(device.mac)
-                                            : ""
-                                    }
-                                </div>
-
-                            </div>
-
-                            <div>
-                                ${status}
-                            </div>
-
+                        <div>
+                            <a
+                                href="/device/${ip}"
+                            >
+                                ${hostname}
+                            </a>
                         </div>
 
-                    </a>
-                `;
+                        <div>
+                            ${ip}
+                        </div>
 
+                        <div>
+                            ${mac}
+                        </div>
+
+                        <div>
+                            ${rx}
+                        </div>
+
+                        <div>
+                            ${tx}
+                        </div>
+
+                    </div>
+                `;
             }
         ).join("");
-
 }
 
 
-function escapeHtml(
-    value
-) {
+async function refreshDashboard() {
 
-    const div =
-        document.createElement(
-            "div"
+    try {
+
+        const response =
+            await fetch(
+                "/api/dashboard"
+            );
+
+        if (!response.ok) {
+            throw new Error(
+                "Dashboard request failed"
+            );
+        }
+
+        const data =
+            await response.json();
+
+
+        // System
+
+        const system =
+            data.system || {};
+
+        document.getElementById(
+            "cpu"
+        ).textContent =
+            system.cpu_usage !== null &&
+            system.cpu_usage !== undefined
+                ? system.cpu_usage + "%"
+                : "N/A";
+
+        document.getElementById(
+            "memory"
+        ).textContent =
+            system.memory_usage !== null &&
+            system.memory_usage !== undefined
+                ? system.memory_usage + "%"
+                : "N/A";
+
+        document.getElementById(
+            "temperature"
+        ).textContent =
+            system.temperature !== null &&
+            system.temperature !== undefined
+                ? system.temperature + "°C"
+                : "N/A";
+
+        document.getElementById(
+            "storage"
+        ).textContent =
+            system.storage_usage !== null &&
+            system.storage_usage !== undefined
+                ? system.storage_usage + "%"
+                : "N/A";
+
+        document.getElementById(
+            "uptime"
+        ).textContent =
+            system.uptime_text ||
+            "Unknown";
+
+
+        // Network
+
+        const network =
+            data.network || {};
+
+        const wan =
+            network.wan || {};
+
+        const lan =
+            network.lan || {};
+
+        document.getElementById(
+            "wan-ip"
+        ).textContent =
+            wan.ip || "N/A";
+
+        document.getElementById(
+            "wan-state"
+        ).textContent =
+            wan.state || "unknown";
+
+        document.getElementById(
+            "lan-ip"
+        ).textContent =
+            lan.ip || "N/A";
+
+        document.getElementById(
+            "lan-state"
+        ).textContent =
+            lan.state || "unknown";
+
+        document.getElementById(
+            "internet"
+        ).textContent =
+            network.internet
+                ? "Online"
+                : "Offline";
+
+        document.getElementById(
+            "connections"
+        ).textContent =
+            network.connections !== null &&
+            network.connections !== undefined
+                ? network.connections
+                : "N/A";
+
+
+        // Services
+
+        const services =
+            data.services || {};
+
+        setService(
+            "dhcp",
+            services.dhcp?.enabled
         );
 
-    div.textContent =
-        value;
+        setService(
+            "dns",
+            services.dns?.enabled
+        );
 
-    return div.innerHTML;
+        setService(
+            "nat",
+            services.nat?.enabled
+        );
 
+        setService(
+            "firewall",
+            services.firewall?.enabled
+        );
+
+        setService(
+            "vpn",
+            services.vpn?.enabled
+        );
+
+
+        // Devices
+
+        renderDevices(
+            data.devices || []
+        );
+
+    } catch (error) {
+
+        console.error(
+            "Dashboard refresh failed:",
+            error
+        );
+
+        document.getElementById(
+            "gateway-dot"
+        ).className =
+            "dot inactive";
+    }
 }
 
 
+refreshDashboard();
+
 setInterval(
-    updateDashboard,
+    refreshDashboard,
     3000
 );
 
 </script>
 
-
-{% else %}
-
-
-<div class="header">
-
-    <div>
-        <h1>
-            {{ page|capitalize }}
-        </h1>
-
-        <div class="metric-small">
-            PiServer Network Gateway
-        </div>
-    </div>
-
-</div>
-
-
-<div class="card">
-
-    <div class="section-title">
-        {{ page|capitalize }}
-    </div>
-
-    <p>
-        This PiServer module is available
-        from the navigation menu.
-    </p>
-
-</div>
-
-
-{% endif %}
-
-
-</div>
-
 </body>
-
 </html>
 """
 
 
 # ============================================================
-# Device details HTML
+# Device Details
 # ============================================================
 
-DEVICE_HTML = r"""
+DEVICE_TEMPLATE = """
 <!DOCTYPE html>
-
 <html>
 
 <head>
@@ -2491,29 +1624,24 @@ DEVICE_HTML = r"""
 <style>
 
 body {
+    margin: 0;
+    background: #0f1115;
+    color: #f1f1f1;
     font-family:
         -apple-system,
         BlinkMacSystemFont,
         "Segoe UI",
         sans-serif;
-    background: #f4f6f8;
-    margin: 0;
     padding: 30px;
-    color: #1f2937;
-}
-
-.container {
-    max-width: 800px;
-    margin: auto;
 }
 
 .card {
-    background: white;
-    border-radius: 14px;
-    padding: 25px;
-    margin-bottom: 18px;
-    box-shadow:
-        0 1px 3px rgba(0,0,0,.08);
+    max-width: 800px;
+    margin: auto;
+    background: #171a21;
+    border: 1px solid #282c35;
+    border-radius: 12px;
+    padding: 24px;
 }
 
 h1 {
@@ -2523,143 +1651,131 @@ h1 {
 .row {
     display: flex;
     justify-content: space-between;
-    padding: 13px 0;
-    border-bottom: 1px solid #e5e7eb;
-}
-
-.row:last-child {
-    border-bottom: none;
+    padding: 14px 0;
+    border-bottom: 1px solid #282c35;
 }
 
 .label {
-    color: #6b7280;
+    color: #888;
 }
 
-.online {
-    color: #16a34a;
-    font-weight: 600;
+.value {
+    font-family: monospace;
 }
 
-.back {
-    display: inline-block;
-    margin-bottom: 20px;
-    text-decoration: none;
-    color: #2563eb;
+a {
+    color: white;
 }
 
 </style>
 
 </head>
 
-
 <body>
 
-<div class="container">
-
-<a
-    class="back"
-    href="/"
->
-    ← Back to Dashboard
-</a>
-
-
 <div class="card">
+
+    <p>
+        <a href="/">
+            ← Back to Dashboard
+        </a>
+    </p>
 
     <h1>
         {{ device.hostname }}
     </h1>
 
     <div class="row">
-
-        <span class="label">
-            Status
-        </span>
-
-        {% if device.connected %}
-
-            <span class="online">
-                ● Connected
-            </span>
-
-        {% else %}
-
-            <span>
-                Offline
-            </span>
-
-        {% endif %}
-
-    </div>
-
-
-    <div class="row">
-
         <span class="label">
             IP Address
         </span>
 
-        <strong>
+        <span class="value">
             {{ device.ip }}
-        </strong>
-
+        </span>
     </div>
 
-
     <div class="row">
-
         <span class="label">
             MAC Address
         </span>
 
-        <strong>
+        <span class="value">
             {{ device.mac or "Unknown" }}
-        </strong>
-
+        </span>
     </div>
 
-
     <div class="row">
-
         <span class="label">
             Interface
         </span>
 
-        <strong>
-            {{ config.lan_interface }}
-        </strong>
-
+        <span class="value">
+            {{ device.interface }}
+        </span>
     </div>
-
 
     <div class="row">
-
         <span class="label">
-            DHCP Lease Expiry
+            Connection State
         </span>
 
-        <strong>
-            {{ device.expiry or "Unknown" }}
-        </strong>
-
+        <span class="value">
+            {{ device.state or "Unknown" }}
+        </span>
     </div>
 
-</div>
+    <div class="row">
+        <span class="label">
+            Connection
+        </span>
 
+        <span class="value">
+            {% if device.connected %}
+                Online
+            {% else %}
+                Offline
+            {% endif %}
+        </span>
+    </div>
 
-<div class="card">
+    <div class="row">
+        <span class="label">
+            RX
+        </span>
 
-    <h2>
-        Device Metrics
-    </h2>
+        <span class="value">
+            {{ device.rx_human }}
+        </span>
+    </div>
 
-    <p>
-        Traffic statistics can be added here by
-        collecting per-client counters from nftables,
-        conntrack, or interface-level accounting.
+    <div class="row">
+        <span class="label">
+            TX
+        </span>
+
+        <span class="value">
+            {{ device.tx_human }}
+        </span>
+    </div>
+
+    <div class="row">
+        <span class="label">
+            DHCP Lease Expiration
+        </span>
+
+        <span class="value">
+            {{ device.expiry_text }}
+        </span>
+    </div>
+
+    <br>
+
+    <p style="color:#777;">
+        Per-device bandwidth accounting can be
+        added later using nftables counters or
+        conntrack accounting.
     </p>
-
-</div>
 
 </div>
 
@@ -2670,39 +1786,634 @@ h1 {
 
 
 # ============================================================
-# Main
+# Routes
+# ============================================================
+
+@app.route("/")
+def dashboard():
+    """
+    Main PiServer dashboard.
+    """
+
+    return render_template_string(
+        DASHBOARD_TEMPLATE
+    )
+
+
+@app.route("/api/dashboard")
+def dashboard_api():
+    """
+    JSON API consumed by the dashboard.
+    """
+
+    try:
+
+        return jsonify(
+            get_dashboard_data()
+        )
+
+    except Exception as exc:
+
+        return jsonify(
+            {
+                "error": str(exc)
+            }
+        ), 500
+
+
+@app.route("/device/<ip>")
+def device_details(ip):
+    """
+    Display details for one LAN device.
+    """
+
+    try:
+        ipaddress.ip_address(ip)
+
+    except ValueError:
+        return (
+            "Invalid IP address",
+            400,
+        )
+
+    devices = (
+        get_connected_devices()
+    )
+
+    device = None
+
+    for candidate in devices:
+
+        if candidate.get("ip") == ip:
+            device = candidate
+            break
+
+    if device is None:
+
+        device = {
+            "hostname": "Unknown",
+            "ip": ip,
+            "mac": None,
+            "interface": (
+                get_network_config().get(
+                    "lan_interface",
+                    "wlan0",
+                )
+            ),
+            "state": "unknown",
+            "connected": False,
+            "rx_human": "N/A",
+            "tx_human": "N/A",
+            "expiry_text": "N/A",
+        }
+
+    return render_template_string(
+        DEVICE_TEMPLATE,
+        device=device,
+    )
+
+
+# ============================================================
+# Network Page
+# ============================================================
+
+@app.route(
+    "/network",
+    methods=["GET", "POST"],
+)
+def network_page():
+
+    if request.method == "POST":
+
+        action = request.form.get(
+            "nat_action"
+        )
+
+        try:
+
+            if action == "enable":
+                enable_nat()
+
+            elif action == "disable":
+                disable_nat()
+
+        except Exception as exc:
+
+            return (
+                f"NAT operation failed: {exc}",
+                500,
+            )
+
+        return redirect(
+            url_for("network_page")
+        )
+
+    network = get_network_config()
+
+    wan_interface = network.get(
+        "wan_interface",
+        "eth0",
+    )
+
+    lan_interface = network.get(
+        "lan_interface",
+        "wlan0",
+    )
+
+    wan = monitoring.get_interface_health(
+        wan_interface
+    )
+
+    lan = monitoring.get_interface_health(
+        lan_interface
+    )
+
+    nat = nat_backend.get_nat_status()
+
+    return render_template_string(
+        """
+        <!DOCTYPE html>
+        <html>
+        <head>
+
+        <meta
+            name="viewport"
+            content="width=device-width"
+        >
+
+        <title>Network - PiServer</title>
+
+        <style>
+
+        body {
+            background:#0f1115;
+            color:#f1f1f1;
+            font-family:Arial,sans-serif;
+            padding:30px;
+        }
+
+        .card {
+            background:#171a21;
+            border:1px solid #282c35;
+            border-radius:12px;
+            padding:20px;
+            margin-bottom:20px;
+        }
+
+        a {
+            color:white;
+        }
+
+        button {
+            padding:9px 14px;
+            background:#252a34;
+            color:white;
+            border:1px solid #3a404c;
+            border-radius:7px;
+        }
+
+        </style>
+
+        </head>
+
+        <body>
+
+        <p>
+            <a href="/">
+                ← Dashboard
+            </a>
+        </p>
+
+        <h1>Network</h1>
+
+        <div class="card">
+
+            <h2>WAN</h2>
+
+            <p>
+                Interface:
+                {{ wan.interface }}
+            </p>
+
+            <p>
+                IP:
+                {{ wan.ip or "N/A" }}
+            </p>
+
+            <p>
+                State:
+                {{ wan.state }}
+            </p>
+
+        </div>
+
+        <div class="card">
+
+            <h2>LAN</h2>
+
+            <p>
+                Interface:
+                {{ lan.interface }}
+            </p>
+
+            <p>
+                IP:
+                {{ lan.ip or "N/A" }}
+            </p>
+
+            <p>
+                State:
+                {{ lan.state }}
+            </p>
+
+        </div>
+
+        <div class="card">
+
+            <h2>NAT</h2>
+
+            <p>
+                Status:
+                {% if nat.enabled %}
+                    Enabled
+                {% else %}
+                    Disabled
+                {% endif %}
+            </p>
+
+            <form method="post">
+
+                {% if nat.enabled %}
+
+                    <button
+                        name="nat_action"
+                        value="disable"
+                    >
+                        Disable NAT
+                    </button>
+
+                {% else %}
+
+                    <button
+                        name="nat_action"
+                        value="enable"
+                    >
+                        Enable NAT
+                    </button>
+
+                {% endif %}
+
+            </form>
+
+        </div>
+
+        </body>
+        </html>
+        """,
+        wan=wan,
+        lan=lan,
+        nat=nat,
+    )
+
+
+# ============================================================
+# Module Pages
+# ============================================================
+
+def simple_page(title, description):
+    """
+    Render a simple module page.
+    """
+
+    return render_template_string(
+        """
+        <!DOCTYPE html>
+        <html>
+
+        <head>
+
+        <meta
+            name="viewport"
+            content="width=device-width"
+        >
+
+        <title>{{ title }} - PiServer</title>
+
+        <style>
+
+        body {
+            background:#0f1115;
+            color:#f1f1f1;
+            font-family:Arial,sans-serif;
+            padding:30px;
+        }
+
+        .card {
+            background:#171a21;
+            border:1px solid #282c35;
+            border-radius:12px;
+            padding:20px;
+            max-width:900px;
+        }
+
+        a {
+            color:white;
+        }
+
+        </style>
+
+        </head>
+
+        <body>
+
+        <p>
+            <a href="/">
+                ← Dashboard
+            </a>
+        </p>
+
+        <div class="card">
+
+            <h1>
+                {{ title }}
+            </h1>
+
+            <p>
+                {{ description }}
+            </p>
+
+        </div>
+
+        </body>
+
+        </html>
+        """,
+        title=title,
+        description=description,
+    )
+
+
+@app.route("/dhcp")
+def dhcp_page():
+
+    return simple_page(
+        "DHCP",
+        "DHCP configuration and lease management."
+    )
+
+
+@app.route("/dns")
+def dns_page():
+
+    return simple_page(
+        "DNS",
+        "DNS configuration, filtering, and health."
+    )
+
+
+@app.route("/firewall")
+def firewall_page():
+
+    return simple_page(
+        "Firewall",
+        "PiServer nftables firewall controls."
+    )
+
+
+@app.route("/vpn")
+def vpn_page():
+
+    return simple_page(
+        "VPN",
+        "WireGuard VPN configuration and status."
+    )
+
+
+@app.route("/monitoring")
+def monitoring_page():
+
+    data = monitoring.get_dashboard_metrics()
+
+    return render_template_string(
+        """
+        <!DOCTYPE html>
+        <html>
+
+        <head>
+
+        <meta
+            name="viewport"
+            content="width=device-width"
+        >
+
+        <title>Monitoring - PiServer</title>
+
+        <style>
+
+        body {
+            background:#0f1115;
+            color:#f1f1f1;
+            font-family:Arial,sans-serif;
+            padding:30px;
+        }
+
+        .card {
+            background:#171a21;
+            border:1px solid #282c35;
+            border-radius:12px;
+            padding:20px;
+            margin-bottom:20px;
+        }
+
+        a {
+            color:white;
+        }
+
+        </style>
+
+        </head>
+
+        <body>
+
+        <p>
+            <a href="/">
+                ← Dashboard
+            </a>
+        </p>
+
+        <h1>Monitoring</h1>
+
+        <div class="card">
+
+            <h2>System</h2>
+
+            <p>
+                CPU:
+                {{ data.system.cpu_usage }}%
+            </p>
+
+            <p>
+                Memory:
+                {{ data.system.memory_usage }}%
+            </p>
+
+            <p>
+                Temperature:
+                {{ data.system.temperature }}°C
+            </p>
+
+            <p>
+                Storage:
+                {{ data.system.storage_usage }}%
+            </p>
+
+            <p>
+                Uptime:
+                {{ data.system.uptime_text }}
+            </p>
+
+        </div>
+
+        <div class="card">
+
+            <h2>Network</h2>
+
+            <p>
+                Internet:
+                {{ data.network.internet }}
+            </p>
+
+            <p>
+                TCP connections:
+                {{ data.network.connections }}
+            </p>
+
+            <p>
+                Default route:
+                {{ data.network.default_route }}
+            </p>
+
+        </div>
+
+        </body>
+
+        </html>
+        """,
+        data=data,
+    )
+
+
+@app.route("/logs")
+def logs_page():
+
+    logs = []
+
+    if gateway_logging is not None:
+
+        try:
+
+            if hasattr(
+                gateway_logging,
+                "get_recent_logs",
+            ):
+                logs = (
+                    gateway_logging
+                    .get_recent_logs()
+                )
+
+        except Exception:
+            logs = []
+
+    return render_template_string(
+        """
+        <!DOCTYPE html>
+        <html>
+
+        <head>
+
+        <meta
+            name="viewport"
+            content="width=device-width"
+        >
+
+        <title>Logs - PiServer</title>
+
+        <style>
+
+        body {
+            background:#0f1115;
+            color:#f1f1f1;
+            font-family:Arial,sans-serif;
+            padding:30px;
+        }
+
+        .card {
+            background:#171a21;
+            border:1px solid #282c35;
+            border-radius:12px;
+            padding:20px;
+        }
+
+        pre {
+            white-space:pre-wrap;
+            word-break:break-word;
+        }
+
+        a {
+            color:white;
+        }
+
+        </style>
+
+        </head>
+
+        <body>
+
+        <p>
+            <a href="/">
+                ← Dashboard
+            </a>
+        </p>
+
+        <h1>Logs</h1>
+
+        <div class="card">
+
+            {% if logs %}
+
+                <pre>{{ logs }}</pre>
+
+            {% else %}
+
+                <p>
+                    No recent logs available.
+                </p>
+
+            {% endif %}
+
+        </div>
+
+        </body>
+
+        </html>
+        """,
+        logs=logs,
+    )
+
+
+# ============================================================
+# Application Entry Point
 # ============================================================
 
 def main():
-
-    print(
-        "==================================="
-    )
-
-    print(
-        "PiServer Network Gateway"
-    )
-
-    print(
-        "==================================="
-    )
-
-    print(
-        "Starting web interface..."
-    )
-
-    print(
-        "Listening on port 80..."
-    )
 
     app.run(
         host="0.0.0.0",
         port=80,
         debug=False,
-        threaded=True,
     )
 
 
 if __name__ == "__main__":
     main()
-
+```
