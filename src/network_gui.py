@@ -1,5 +1,3 @@
-```python
-#!/usr/bin/env python3
 
 from flask import (
     Flask,
@@ -2416,4 +2414,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
