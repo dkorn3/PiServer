@@ -5,14 +5,13 @@
                 Main Coordinator
                        │
         ┌──────────────┼──────────────┐
-        ▼              ▼              ▼
+                                    
    network.py      firewall.py      nat.py
-        │              │              │
-        ▼              ▼              ▼
+        │              │              
      dhcp.py         dns.py         vpn.py
         │              │              │
         └──────────────┼──────────────┘
-                       ▼
+                       
                   Linux system
 
                        ▲
