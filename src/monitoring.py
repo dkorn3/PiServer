@@ -1,5 +1,7 @@
-import subprocess
+
+
 import os
+import subprocess
 import time
 
 try:
@@ -8,19 +10,100 @@ except ImportError:
     psutil = None
 
 
-## System Monitoring ##
+# ============================================================
+# Utility
+# ============================================================
 
+def _run_command(command, timeout=5):
+    """
+    Run a system command and return the CompletedProcess.
+
+    Returns None if the command cannot be executed.
+    """
+
+    try:
+        return subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+
+    except (
+        OSError,
+        subprocess.TimeoutExpired,
+    ):
+        return None
+
+
+def format_bytes(value):
+    """
+    Convert bytes into a human-readable string.
+    """
+
+    if value is None:
+        return "N/A"
+
+    value = float(value)
+
+    if value < 1024:
+        return f"{value:.0f} B"
+
+    if value < 1024 ** 2:
+        return f"{value / 1024:.1f} KB"
+
+    if value < 1024 ** 3:
+        return f"{value / 1024 ** 2:.1f} MB"
+
+    if value < 1024 ** 4:
+        return f"{value / 1024 ** 3:.2f} GB"
+
+    return f"{value / 1024 ** 4:.2f} TB"
+
+
+def format_uptime(seconds):
+    """
+    Convert uptime in seconds into a readable string.
+    """
+
+    if seconds is None:
+        return "Unknown"
+
+    seconds = int(seconds)
+
+    days = seconds // 86400
+    hours = (seconds % 86400) // 3600
+    minutes = (seconds % 3600) // 60
+
+    if days:
+        return f"{days}d {hours}h {minutes}m"
+
+    if hours:
+        return f"{hours}h {minutes}m"
+
+    return f"{minutes}m"
+
+
+# ============================================================
+# System Monitoring
+# ============================================================
 
 def get_system_status():
     """
     Return a snapshot of overall system health.
     """
+
+    uptime = get_uptime()
+
     return {
         "cpu_usage": get_cpu_usage(),
         "memory_usage": get_memory_usage(),
         "storage_usage": get_storage_usage(),
         "temperature": get_temperature(),
-        "uptime": get_uptime(),
+        "uptime": uptime,
+        "uptime_text": format_uptime(uptime),
+        "load_average": get_load_average(),
     }
 
 
@@ -28,48 +111,160 @@ def get_cpu_usage():
     """
     Return CPU utilization as a percentage.
     """
-    if psutil is None:
-        return None
 
-    return psutil.cpu_percent(interval=0.5)
+    if psutil is not None:
+
+        try:
+            return round(
+                psutil.cpu_percent(
+                    interval=0.2
+                ),
+                1,
+            )
+
+        except (
+            OSError,
+            ValueError,
+        ):
+            pass
+
+    return None
 
 
 def get_memory_usage():
     """
     Return memory utilization as a percentage.
     """
+
     if psutil is None:
         return None
 
-    return psutil.virtual_memory().percent
+    try:
+
+        return round(
+            psutil.virtual_memory().percent,
+            1,
+        )
+
+    except OSError:
+        return None
+
+
+def get_memory_details():
+    """
+    Return detailed memory statistics.
+    """
+
+    if psutil is None:
+        return {}
+
+    try:
+
+        memory = psutil.virtual_memory()
+
+        return {
+            "total": memory.total,
+            "available": memory.available,
+            "used": memory.used,
+            "percent": memory.percent,
+            "total_human": format_bytes(
+                memory.total
+            ),
+            "used_human": format_bytes(
+                memory.used
+            ),
+            "available_human": format_bytes(
+                memory.available
+            ),
+        }
+
+    except OSError:
+        return {}
 
 
 def get_storage_usage():
     """
-    Return root filesystem storage utilization as a percentage.
+    Return root filesystem storage utilization.
     """
+
     if psutil is None:
         return None
 
-    return psutil.disk_usage("/").percent
+    try:
+
+        return round(
+            psutil.disk_usage("/").percent,
+            1,
+        )
+
+    except OSError:
+        return None
+
+
+def get_storage_details():
+    """
+    Return detailed root filesystem storage.
+    """
+
+    if psutil is None:
+        return {}
+
+    try:
+
+        disk = psutil.disk_usage("/")
+
+        return {
+            "total": disk.total,
+            "used": disk.used,
+            "free": disk.free,
+            "percent": disk.percent,
+            "total_human": format_bytes(
+                disk.total
+            ),
+            "used_human": format_bytes(
+                disk.used
+            ),
+            "free_human": format_bytes(
+                disk.free
+            ),
+        }
+
+    except OSError:
+        return {}
 
 
 def get_temperature():
     """
-    Return CPU/system temperature in degrees Celsius.
-
-    Raspberry Pi Linux systems commonly expose thermal data through:
-        /sys/class/thermal/thermal_zone0/temp
+    Return CPU/system temperature in Celsius.
     """
-    temperature_file = "/sys/class/thermal/thermal_zone0/temp"
+
+    temperature_file = (
+        "/sys/class/thermal/"
+        "thermal_zone0/temp"
+    )
 
     try:
-        with open(temperature_file, "r") as file:
-            temperature = int(file.read().strip())
 
-        return temperature / 1000.0
+        with open(
+            temperature_file,
+            "r",
+            encoding="utf-8",
+        ) as file:
 
-    except (FileNotFoundError, ValueError, OSError):
+            temperature = int(
+                file.read().strip()
+            )
+
+        return round(
+            temperature / 1000.0,
+            1,
+        )
+
+    except (
+        FileNotFoundError,
+        ValueError,
+        OSError,
+    ):
         return None
 
 
@@ -77,326 +272,834 @@ def get_uptime():
     """
     Return system uptime in seconds.
     """
+
     if psutil is not None:
-        return time.time() - psutil.boot_time()
+
+        try:
+
+            return time.time() - (
+                psutil.boot_time()
+            )
+
+        except OSError:
+            pass
 
     try:
-        with open("/proc/uptime", "r") as file:
-            return float(file.read().split()[0])
 
-    except (FileNotFoundError, ValueError, OSError):
+        with open(
+            "/proc/uptime",
+            "r",
+            encoding="utf-8",
+        ) as file:
+
+            return float(
+                file.read().split()[0]
+            )
+
+    except (
+        FileNotFoundError,
+        ValueError,
+        OSError,
+    ):
         return None
 
 
-## Network Monitoring ##
+def get_load_average():
+    """
+    Return Linux load averages.
+    """
 
+    try:
+
+        load1, load5, load15 = (
+            os.getloadavg()
+        )
+
+        return {
+            "1m": round(load1, 2),
+            "5m": round(load5, 2),
+            "15m": round(load15, 2),
+        }
+
+    except OSError:
+        return {}
+
+
+# ============================================================
+# Network Monitoring
+# ============================================================
 
 def get_interface_stats(interface):
     """
-    Return traffic and error statistics for a network interface.
+    Return traffic and error statistics for
+    a specific network interface.
     """
+
     if psutil is None:
         return None
 
-    stats = psutil.net_io_counters(pernic=True)
+    try:
 
-    if interface not in stats:
+        stats = psutil.net_io_counters(
+            pernic=True
+        )
+
+        if interface not in stats:
+            return None
+
+        data = stats[interface]
+
+        return {
+            "bytes_sent": data.bytes_sent,
+            "bytes_received": data.bytes_recv,
+            "packets_sent": data.packets_sent,
+            "packets_received": data.packets_recv,
+            "errors_sent": data.errout,
+            "errors_received": data.errin,
+            "drops_sent": data.dropout,
+            "drops_received": data.dropin,
+
+            "bytes_sent_human": format_bytes(
+                data.bytes_sent
+            ),
+
+            "bytes_received_human": format_bytes(
+                data.bytes_recv
+            ),
+        }
+
+    except OSError:
         return None
-
-    interface_stats = stats[interface]
-
-    return {
-        "bytes_sent": interface_stats.bytes_sent,
-        "bytes_received": interface_stats.bytes_recv,
-        "packets_sent": interface_stats.packets_sent,
-        "packets_received": interface_stats.packets_recv,
-        "errors_sent": interface_stats.errout,
-        "errors_received": interface_stats.errin,
-        "drops_sent": interface_stats.dropout,
-        "drops_received": interface_stats.dropin,
-    }
 
 
 def get_network_stats():
     """
-    Return statistics for all available network interfaces.
+    Return statistics for all network interfaces.
     """
+
     if psutil is None:
         return {}
 
-    stats = psutil.net_io_counters(pernic=True)
+    try:
+
+        stats = psutil.net_io_counters(
+            pernic=True
+        )
+
+        return {
+            interface: {
+                "bytes_sent": data.bytes_sent,
+                "bytes_received": data.bytes_recv,
+                "packets_sent": data.packets_sent,
+                "packets_received": data.packets_recv,
+                "errors_sent": data.errout,
+                "errors_received": data.errin,
+                "drops_sent": data.dropout,
+                "drops_received": data.dropin,
+                "bytes_sent_human": format_bytes(
+                    data.bytes_sent
+                ),
+                "bytes_received_human": format_bytes(
+                    data.bytes_recv
+                ),
+            }
+
+            for interface, data
+            in stats.items()
+        }
+
+    except OSError:
+        return {}
+
+
+def get_interface_state(interface):
+    """
+    Return whether an interface is operational.
+    """
+
+    path = (
+        f"/sys/class/net/"
+        f"{interface}/operstate"
+    )
+
+    try:
+
+        with open(
+            path,
+            "r",
+            encoding="utf-8",
+        ) as file:
+
+            return file.read().strip()
+
+    except (
+        FileNotFoundError,
+        OSError,
+    ):
+        return "unknown"
+
+
+def get_interface_ip(interface):
+    """
+    Return the first IPv4 address assigned to
+    an interface.
+    """
+
+    result = _run_command(
+        [
+            "ip",
+            "-4",
+            "-o",
+            "addr",
+            "show",
+            "dev",
+            interface,
+        ]
+    )
+
+    if result is None:
+        return None
+
+    for line in result.stdout.splitlines():
+
+        parts = line.split()
+
+        if "inet" not in parts:
+            continue
+
+        index = parts.index("inet")
+
+        if index + 1 < len(parts):
+
+            return (
+                parts[index + 1]
+                .split("/")[0]
+            )
+
+    return None
+
+
+def get_interface_health(interface):
+    """
+    Return a complete status snapshot for
+    one network interface.
+    """
+
+    stats = get_interface_stats(
+        interface
+    )
 
     return {
-        interface: {
-            "bytes_sent": interface_stats.bytes_sent,
-            "bytes_received": interface_stats.bytes_recv,
-            "packets_sent": interface_stats.packets_sent,
-            "packets_received": interface_stats.packets_recv,
-            "errors_sent": interface_stats.errout,
-            "errors_received": interface_stats.errin,
-            "drops_sent": interface_stats.dropout,
-            "drops_received": interface_stats.dropin,
-        }
-        for interface, interface_stats in stats.items()
+        "interface": interface,
+        "state": get_interface_state(
+            interface
+        ),
+        "ip": get_interface_ip(
+            interface
+        ),
+        "stats": stats,
     }
 
 
 def get_connection_count():
     """
     Return the number of active TCP connections.
-
-    psutil.net_connections() requires appropriate privileges for
-    complete system-wide results.
     """
+
     if psutil is None:
         return None
 
     try:
-        connections = psutil.net_connections(kind="tcp")
+
+        connections = psutil.net_connections(
+            kind="tcp"
+        )
+
         return len(connections)
 
-    except (psutil.AccessDenied, OSError):
+    except (
+        psutil.AccessDenied,
+        OSError,
+    ):
         return None
 
 
-## Service Monitoring ##
+def get_default_route():
+    """
+    Return the Linux default route.
+    """
 
+    result = _run_command(
+        [
+            "ip",
+            "route",
+            "show",
+            "default",
+        ]
+    )
+
+    if result is None:
+        return None
+
+    lines = result.stdout.splitlines()
+
+    if not lines:
+        return None
+
+    return lines[0]
+
+
+def check_internet():
+    """
+    Test basic Internet connectivity.
+
+    This is intentionally a simple ICMP test.
+    """
+
+    result = _run_command(
+        [
+            "ping",
+            "-c",
+            "1",
+            "-W",
+            "2",
+            "1.1.1.1",
+        ],
+        timeout=4,
+    )
+
+    if result is None:
+        return False
+
+    return result.returncode == 0
+
+
+# ============================================================
+# Service Monitoring
+# ============================================================
 
 def get_service_status(service):
     """
     Return the systemd state of a service.
-
-    Example:
-        get_service_status("ssh")
     """
-    try:
-        result = subprocess.run(
-            ["systemctl", "is-active", service],
-            capture_output=True,
-            text=True,
-            check=False
-        )
 
-        return result.stdout.strip()
+    result = _run_command(
+        [
+            "systemctl",
+            "is-active",
+            service,
+        ]
+    )
 
-    except OSError:
+    if result is None:
         return None
+
+    return result.stdout.strip()
 
 
 def get_gateway_services_status():
     """
-    Return the status of the services used by the gateway.
-
-    These names are placeholders until the actual service layout
-    is finalized.
+    Return PiServer service states.
     """
+
     services = {
-        "ssh": "ssh",
-        "wireguard": "wg-quick@wg0",
+        "pi_gateway": "pi-gateway.service",
+        "piserver_lan": "piserver-lan.service",
+        "hostapd": "hostapd.service",
+        "dnsmasq": "dnsmasq.service",
+        "nftables": "nftables.service",
+        "ssh": "ssh.service",
     }
 
     return {
-        name: get_service_status(service)
-        for name, service in services.items()
+        name: get_service_status(
+            service
+        )
+
+        for name, service
+        in services.items()
     }
 
 
-## VPN Monitoring ##
+# ============================================================
+# NAT Monitoring
+# ============================================================
 
+def get_nat_status():
+    """
+    Return the current PiServer NAT state.
+    """
+
+    try:
+
+        import nat
+
+        return nat.get_nat_status()
+
+    except (
+        ImportError,
+        AttributeError,
+        OSError,
+    ):
+
+        return {
+            "enabled": False,
+            "rules": "",
+            "error": (
+                "NAT monitoring unavailable"
+            ),
+        }
+
+
+# ============================================================
+# VPN Monitoring
+# ============================================================
 
 def get_vpn_status():
     """
     Return the operational state of WireGuard.
     """
-    try:
-        result = subprocess.run(
-            ["wg", "show", "wg0"],
-            capture_output=True,
-            text=True,
-            check=False
-        )
 
-        if result.returncode != 0:
-            return "inactive"
+    result = _run_command(
+        [
+            "wg",
+            "show",
+            "wg0",
+        ]
+    )
 
-        return "active"
-
-    except OSError:
+    if result is None:
         return "unknown"
+
+    if result.returncode != 0:
+        return "inactive"
+
+    return "active"
 
 
 def get_vpn_handshake():
     """
     Return WireGuard peer handshake information.
-
-    The result is a dictionary keyed by peer public key.
     """
-    try:
-        result = subprocess.run(
-            ["wg", "show", "wg0", "latest-handshakes"],
-            capture_output=True,
-            text=True,
-            check=False
-        )
 
-        if result.returncode != 0:
-            return {}
+    result = _run_command(
+        [
+            "wg",
+            "show",
+            "wg0",
+            "latest-handshakes",
+        ]
+    )
 
-        handshakes = {}
-
-        for line in result.stdout.splitlines():
-            parts = line.split()
-
-            if len(parts) != 2:
-                continue
-
-            public_key = parts[0]
-
-            try:
-                timestamp = int(parts[1])
-            except ValueError:
-                timestamp = None
-
-            handshakes[public_key] = timestamp
-
-        return handshakes
-
-    except OSError:
+    if result is None:
         return {}
+
+    if result.returncode != 0:
+        return {}
+
+    handshakes = {}
+
+    for line in result.stdout.splitlines():
+
+        parts = line.split()
+
+        if len(parts) != 2:
+            continue
+
+        public_key = parts[0]
+
+        try:
+            timestamp = int(parts[1])
+
+        except ValueError:
+            timestamp = None
+
+        handshakes[
+            public_key
+        ] = timestamp
+
+    return handshakes
 
 
 def get_vpn_statistics():
     """
-    Return WireGuard transfer statistics for each peer.
+    Return WireGuard transfer statistics.
     """
-    try:
-        result = subprocess.run(
-            ["wg", "show", "wg0", "transfer"],
-            capture_output=True,
-            text=True,
-            check=False
-        )
 
-        if result.returncode != 0:
-            return {}
+    result = _run_command(
+        [
+            "wg",
+            "show",
+            "wg0",
+            "transfer",
+        ]
+    )
 
-        statistics = {}
-
-        for line in result.stdout.splitlines():
-            parts = line.split()
-
-            if len(parts) != 3:
-                continue
-
-            public_key = parts[0]
-
-            try:
-                received = int(parts[1])
-                sent = int(parts[2])
-            except ValueError:
-                continue
-
-            statistics[public_key] = {
-                "bytes_received": received,
-                "bytes_sent": sent,
-            }
-
-        return statistics
-
-    except OSError:
+    if result is None:
         return {}
 
+    if result.returncode != 0:
+        return {}
 
-## DNS Monitoring ##
+    statistics = {}
+
+    for line in result.stdout.splitlines():
+
+        parts = line.split()
+
+        if len(parts) != 3:
+            continue
+
+        public_key = parts[0]
+
+        try:
+
+            received = int(
+                parts[1]
+            )
+
+            sent = int(
+                parts[2]
+            )
+
+        except ValueError:
+            continue
+
+        statistics[
+            public_key
+        ] = {
+            "bytes_received": received,
+            "bytes_sent": sent,
+            "bytes_received_human":
+                format_bytes(
+                    received
+                ),
+            "bytes_sent_human":
+                format_bytes(
+                    sent
+                ),
+        }
+
+    return statistics
+
+
+# ============================================================
+# DNS Monitoring
+# ============================================================
 
 def get_dns_health():
     """
     Return DNS health information.
-
-    The DNS module owns DNS-specific behavior; this function
-    provides a monitoring interface for it.
     """
+
     try:
+
         import dns
 
         return dns.get_dns_health()
 
-    except (ImportError, AttributeError):
+    except (
+        ImportError,
+        AttributeError,
+    ):
+
         return {
             "status": "unknown",
-            "reason": "DNS monitoring not implemented",
+            "reason": (
+                "DNS monitoring not implemented"
+            ),
         }
 
 
-## DHCP Monitoring ##
-
+# ============================================================
+# DHCP Monitoring
+# ============================================================
 
 def get_dhcp_health():
     """
     Return DHCP health information.
     """
+
     try:
+
         import dhcp
 
         return dhcp.get_dhcp_health()
 
-    except (ImportError, AttributeError):
+    except (
+        ImportError,
+        AttributeError,
+    ):
+
         return {
             "status": "unknown",
-            "reason": "DHCP monitoring not implemented",
+            "reason": (
+                "DHCP monitoring not implemented"
+            ),
         }
 
 
-## Firewall Monitoring ##
-
+# ============================================================
+# Firewall Monitoring
+# ============================================================
 
 def get_firewall_health():
     """
     Return firewall health information.
     """
+
     try:
+
         import firewall
 
-        status = firewall.get_firewall_status()
+        status = (
+            firewall.get_firewall_status()
+        )
 
         return {
             "status": status
         }
 
-    except (ImportError, AttributeError):
+    except (
+        ImportError,
+        AttributeError,
+    ):
+
         return {
             "status": "unknown",
-            "reason": "Firewall monitoring not implemented",
+            "reason": (
+                "Firewall monitoring not implemented"
+            ),
         }
 
 
-## Gateway Health ##
+# ============================================================
+# Dashboard Metrics
+# ============================================================
 
+def get_dashboard_metrics(
+    wan_interface="eth0",
+    lan_interface="wlan0",
+):
+    """
+    Return the information required by
+    the PiServer dashboard.
+    """
 
-def get_gateway_health():
-    """
-    Return a combined health snapshot of the gateway.
-    """
+    wan = get_interface_health(
+        wan_interface
+    )
+
+    lan = get_interface_health(
+        lan_interface
+    )
+
+    services = (
+        get_gateway_services_status()
+    )
+
+    nat = get_nat_status()
+
     return {
         "system": get_system_status(),
-        "network": get_network_stats(),
-        "connections": get_connection_count(),
-        "services": get_gateway_services_status(),
-        "vpn": {
-            "status": get_vpn_status(),
-            "handshakes": get_vpn_handshake(),
-            "statistics": get_vpn_statistics(),
+
+        "network": {
+            "wan": wan,
+            "lan": lan,
+            "default_route":
+                get_default_route(),
+            "internet":
+                check_internet(),
+            "connections":
+                get_connection_count(),
         },
-        "dns": get_dns_health(),
-        "dhcp": get_dhcp_health(),
-        "firewall": get_firewall_health(),
+
+        "services": services,
+
+        "nat": nat,
+
+        "vpn": {
+            "status":
+                get_vpn_status(),
+            "handshakes":
+                get_vpn_handshake(),
+            "statistics":
+                get_vpn_statistics(),
+        },
+
+        "dns":
+            get_dns_health(),
+
+        "dhcp":
+            get_dhcp_health(),
+
+        "firewall":
+            get_firewall_health(),
+
+        "timestamp":
+            time.time(),
     }
 
 
-# Convenience wrapper for the rest of the project.
+# ============================================================
+# Gateway Health
+# ============================================================
+
+def get_gateway_health():
+    """
+    Return a combined health snapshot of
+    the PiServer gateway.
+
+    This preserves the original interface
+    used by the existing GUI.
+    """
+
+    return {
+        "system":
+            get_system_status(),
+
+        "network":
+            get_network_stats(),
+
+        "connections":
+            get_connection_count(),
+
+        "services":
+            get_gateway_services_status(),
+
+        "nat":
+            get_nat_status(),
+
+        "vpn": {
+            "status":
+                get_vpn_status(),
+            "handshakes":
+                get_vpn_handshake(),
+            "statistics":
+                get_vpn_statistics(),
+        },
+
+        "dns":
+            get_dns_health(),
+
+        "dhcp":
+            get_dhcp_health(),
+
+        "firewall":
+            get_firewall_health(),
+    }
+
+
+# ============================================================
+# Network health convenience wrapper
+# ============================================================
+
 def get_network_health():
+
     try:
+
         import network
+
         return network.get_network_status()
-    except (ImportError, AttributeError):
-        return {"status": "unknown"}
+
+    except (
+        ImportError,
+        AttributeError,
+    ):
+
+        return {
+            "status": "unknown"
+        }
+
+
+# ============================================================
+# Standalone test
+# ============================================================
+
+if __name__ == "__main__":
+
+    print(
+        "==================================="
+    )
+
+    print(
+        "PiServer Monitoring"
+    )
+
+    print(
+        "==================================="
+    )
+
+    print()
+
+    print(
+        "System:"
+    )
+
+    system = get_system_status()
+
+    for key, value in system.items():
+
+        print(
+            f"  {key}: {value}"
+        )
+
+    print()
+
+    print(
+        "Network:"
+    )
+
+    dashboard = get_dashboard_metrics()
+
+    print(
+        f"  WAN: "
+        f"{dashboard['network']['wan']}"
+    )
+
+    print(
+        f"  LAN: "
+        f"{dashboard['network']['lan']}"
+    )
+
+    print(
+        f"  Internet: "
+        f"{dashboard['network']['internet']}"
+    )
+
+    print(
+        f"  Connections: "
+        f"{dashboard['network']['connections']}"
+    )
+
+    print()
+
+    print(
+        "Services:"
+    )
+
+    for name, status in (
+        dashboard["services"].items()
+    ):
+
+        print(
+            f"  {name}: {status}"
+        )
+
+    print()
+
+    print(
+        "NAT:"
+    )
+
+    print(
+        f"  Enabled: "
+        f"{dashboard['nat'].get('enabled')}"
+    )
+
+    print()
+
+    print(
+        "PiServer monitoring test complete."
+    )
+
