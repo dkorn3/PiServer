@@ -6,6 +6,7 @@ import network as network_backend
 import dns as dns_backend
 import dhcp as dhcp_backend
 import firewall as firewall_backend
+import nat as nat_backend
 import monitoring
 import gateway_logger as gateway_logging
 
@@ -33,21 +34,67 @@ except Exception:
 
 
 CONFIG = {
-    "hostname": _BOOT_CONFIG.get("hostname", "DomPi"),
-    "interface": _BOOT_NETWORK.get("wan_interface", "wlan0"),
+    "hostname": _BOOT_CONFIG.get("hostname", "PiServer"),
+
+    # WAN interface
+    "interface": _BOOT_NETWORK.get(
+        "wan_interface",
+        "eth0"
+    ),
+
+    # Gateway mode
     "mode": "gateway",
-    "ip_address": _BOOT_NETWORK.get("lan_address", "").split("/")[0],
+
+    # LAN address
+    "ip_address": (
+        _BOOT_NETWORK.get(
+            "lan_address",
+            ""
+        ).split("/")[0]
+    ),
+
+    # Upstream gateway
     "gateway": "",
+
+    # LAN netmask
     "netmask": "255.255.255.0",
+
+    # DNS server
     "dns": (
-        _BOOT_DNS.get("upstream_servers", ["1.1.1.1"])[0]
+        _BOOT_DNS.get(
+            "upstream_servers",
+            ["1.1.1.1"]
+        )[0]
         if _BOOT_DNS
         else "1.1.1.1"
     ),
-    "dhcp_enabled": _BOOT_DHCP.get("enabled", True),
-    "dns_enabled": _BOOT_DNS.get("enabled", True),
-    "firewall_enabled": _BOOT_FIREWALL.get("enabled", True),
-    "vpn_enabled": _BOOT_VPN.get("enabled", False),
+
+    # Services
+    "dhcp_enabled": _BOOT_DHCP.get(
+        "enabled",
+        True
+    ),
+
+    "dns_enabled": _BOOT_DNS.get(
+        "enabled",
+        False
+    ),
+
+    "firewall_enabled": _BOOT_FIREWALL.get(
+        "enabled",
+        False
+    ),
+
+    "vpn_enabled": _BOOT_VPN.get(
+        "enabled",
+        False
+    ),
+
+    # NAT
+    "nat_enabled": _BOOT_NETWORK.get(
+        "nat_enabled",
+        False
+    ),
 }
 
 
@@ -59,52 +106,188 @@ LOGS = []
 # ============================================================
 
 def _current_backend_config():
-    """Translate the GUI's temporary CONFIG format into gateway config."""
+    """
+    Translate the GUI configuration into the PiServer
+    gateway configuration.
+    """
+
     cfg = gateway_config.load_config()
 
+    # Hostname
     cfg["hostname"] = CONFIG["hostname"]
 
+    # WAN
     cfg["network"]["wan_interface"] = CONFIG["interface"]
-    cfg["network"]["lan_interface"] = cfg["network"].get(
+
+    # LAN
+    cfg["network"]["lan_interface"] = cfg[
+        "network"
+    ].get(
         "lan_interface",
-        "eth1"
+        "wlan0"
     )
 
+    # LAN address
     if CONFIG["ip_address"]:
+        # CONFIG["netmask"] is currently a dotted
+        # decimal netmask such as 255.255.255.0.
+        #
+        # ip_interface() expects CIDR notation,
+        # so convert the netmask to a prefix length.
+        import ipaddress
+
+        try:
+            prefix = ipaddress.IPv4Network(
+                f"0.0.0.0/{CONFIG['netmask']}"
+            ).prefixlen
+        except ValueError:
+            prefix = 24
+
         cfg["network"]["lan_address"] = (
-            f'{CONFIG["ip_address"]}/{CONFIG["netmask"]}'
+            f'{CONFIG["ip_address"]}/{prefix}'
         )
+
+        # Keep the LAN network consistent with
+        # the LAN address.
+        cfg["network"]["lan_network"] = str(
+            ipaddress.ip_interface(
+                cfg["network"]["lan_address"]
+            ).network
+        )
+
+    # NAT
+    cfg["network"]["nat_enabled"] = CONFIG[
+        "nat_enabled"
+    ]
+
+    # DHCP
+    cfg["dhcp"]["enabled"] = CONFIG[
+        "dhcp_enabled"
+    ]
+
+    # DNS
+    cfg["dns"]["enabled"] = CONFIG[
+        "dns_enabled"
+    ]
+
+    # Firewall
+    cfg["firewall"]["enabled"] = CONFIG[
+        "firewall_enabled"
+    ]
+
+    # VPN
+    cfg["vpn"]["enabled"] = CONFIG[
+        "vpn_enabled"
+    ]
 
     return cfg
 
 
 def configure_network():
+    """
+    Save the current GUI configuration.
+    """
+
     cfg = _current_backend_config()
 
     gateway_config.save_config(cfg)
-    gateway_logging.log_info("Network configuration updated.")
+
+    gateway_logging.log_info(
+        "Network configuration updated."
+    )
 
     return True
 
 
+def configure_nat():
+    """
+    Enable or disable IPv4 NAT according to the
+    current GUI configuration.
+    """
+
+    if CONFIG["nat_enabled"]:
+
+        try:
+            status = nat_backend.configure_nat()
+
+            success = status.get(
+                "enabled",
+                False
+            )
+
+        except Exception as exc:
+
+            gateway_logging.log_info(
+                f"NAT configuration failed: {exc}"
+            )
+
+            return False
+
+    else:
+
+        try:
+            nat_backend.disable_nat()
+            success = True
+
+        except Exception as exc:
+
+            gateway_logging.log_info(
+                f"NAT disable failed: {exc}"
+            )
+
+            return False
+
+    gateway_logging.log_info(
+        "NAT enabled."
+        if CONFIG["nat_enabled"]
+        else "NAT disabled."
+    )
+
+    return success
+
+
 def configure_dhcp():
+    """
+    Configure the DHCP service.
+    """
+
     cfg = _current_backend_config()
 
-    dhcp_cfg = dict(cfg["dhcp"])
-    dhcp_cfg["interface"] = cfg["network"]["lan_interface"]
-    dhcp_cfg["address"] = cfg["network"]["lan_address"].split("/")[0]
+    dhcp_cfg = dict(
+        cfg["dhcp"]
+    )
+
+    dhcp_cfg["interface"] = cfg[
+        "network"
+    ]["lan_interface"]
+
+    dhcp_cfg["address"] = cfg[
+        "network"
+    ]["lan_address"].split("/")[0]
 
     if CONFIG["dhcp_enabled"]:
-        success = dhcp_backend.configure_dhcp(dhcp_cfg)
+
+        success = dhcp_backend.configure_dhcp(
+            dhcp_cfg
+        )
+
     else:
+
         import subprocess
+
+        result = subprocess.run(
+            [
+                "systemctl",
+                "stop",
+                "dnsmasq"
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
         success = (
-            subprocess.run(
-                ["systemctl", "stop", "dnsmasq"],
-                capture_output=True,
-                text=True,
-                check=False,
-            ).returncode == 0
+            result.returncode == 0
         )
 
     gateway_logging.log_info(
@@ -117,21 +300,41 @@ def configure_dhcp():
 
 
 def configure_dns():
+    """
+    Configure the DNS service.
+    """
+
     cfg = _current_backend_config()
 
-    servers = cfg["dns"]["upstream_servers"]
+    servers = cfg[
+        "dns"
+    ]["upstream_servers"]
 
     if not CONFIG["dns_enabled"]:
+
         import subprocess
+
         result = subprocess.run(
-            ["systemctl", "stop", "dnsmasq"],
+            [
+                "systemctl",
+                "stop",
+                "dnsmasq"
+            ],
             capture_output=True,
             text=True,
             check=False,
         )
-        success = result.returncode == 0
+
+        success = (
+            result.returncode == 0
+        )
+
     else:
-        dns_backend.set_upstream_servers(servers)
+
+        dns_backend.set_upstream_servers(
+            servers
+        )
+
         success = True
 
     gateway_logging.log_info(
@@ -144,23 +347,52 @@ def configure_dns():
 
 
 def configure_firewall():
+    """
+    Configure the firewall.
+    """
+
     cfg = _current_backend_config()
 
-    lan = cfg["network"]["lan_interface"]
-    wan = cfg["network"]["wan_interface"]
+    lan = cfg[
+        "network"
+    ]["lan_interface"]
+
+    wan = cfg[
+        "network"
+    ]["wan_interface"]
 
     if not CONFIG["firewall_enabled"]:
+
         import subprocess
+
         result = subprocess.run(
-            ["systemctl", "stop", "nftables"],
+            [
+                "systemctl",
+                "stop",
+                "nftables"
+            ],
             capture_output=True,
             text=True,
             check=False,
         )
-        success = result.returncode == 0
+
+        success = (
+            result.returncode == 0
+        )
+
     else:
-        firewall_backend.save_ruleset(lan, wan)
-        success = firewall_backend.apply_firewall_rules(lan, wan)
+
+        firewall_backend.save_ruleset(
+            lan,
+            wan
+        )
+
+        success = (
+            firewall_backend.apply_firewall_rules(
+                lan,
+                wan
+            )
+        )
 
     gateway_logging.log_info(
         "Firewall configuration updated."
@@ -172,9 +404,16 @@ def configure_firewall():
 
 
 def configure_vpn():
+    """
+    VPN configuration placeholder.
+
+    WireGuard integration can be connected here later.
+    """
+
     gateway_logging.log_info(
         "VPN configuration toggle updated."
     )
+
     return True
 
 
@@ -183,10 +422,17 @@ def update_monitoring():
 
 
 def update_network_status():
-    """Return the live Linux network state for the Network page."""
+    """
+    Return the live Linux network state for
+    the Network page.
+    """
+
     try:
+
         return network_backend.get_network_status()
+
     except Exception as exc:
+
         return {
             "interfaces": {},
             "default_route": None,
@@ -218,8 +464,13 @@ def add_log(message):
         LOGS.pop()
 
     try:
-        gateway_logging.log_info(message)
+
+        gateway_logging.log_info(
+            message
+        )
+
     except Exception:
+
         pass
 
 
@@ -245,7 +496,10 @@ def dashboard():
 # Network
 # ============================================================
 
-@app.route("/network", methods=["GET", "POST"])
+@app.route(
+    "/network",
+    methods=["GET", "POST"]
+)
 def network():
 
     if request.method == "POST":
@@ -285,15 +539,30 @@ def network():
             CONFIG["dns"]
         )
 
+        # NAT checkbox
+        CONFIG["nat_enabled"] = (
+            request.form.get(
+                "nat_enabled"
+            ) == "on"
+        )
+
+        # Save configuration
         configure_network()
+
+        # Apply NAT
+        configure_nat()
 
         add_log(
             "Network configuration updated."
         )
 
-        return redirect(url_for("network"))
+        return redirect(
+            url_for("network")
+        )
 
-    network_status = update_network_status()
+    network_status = (
+        update_network_status()
+    )
 
     return render_template_string(
         HTML,
@@ -309,13 +578,18 @@ def network():
 # DHCP
 # ============================================================
 
-@app.route("/dhcp", methods=["GET", "POST"])
+@app.route(
+    "/dhcp",
+    methods=["GET", "POST"]
+)
 def dhcp():
 
     if request.method == "POST":
 
         CONFIG["dhcp_enabled"] = (
-            request.form.get("dhcp_enabled") == "on"
+            request.form.get(
+                "dhcp_enabled"
+            ) == "on"
         )
 
         configure_dhcp()
@@ -329,7 +603,9 @@ def dhcp():
             )
         )
 
-        return redirect(url_for("dhcp"))
+        return redirect(
+            url_for("dhcp")
+        )
 
     return render_template_string(
         HTML,
@@ -344,13 +620,18 @@ def dhcp():
 # DNS
 # ============================================================
 
-@app.route("/dns", methods=["GET", "POST"])
+@app.route(
+    "/dns",
+    methods=["GET", "POST"]
+)
 def dns():
 
     if request.method == "POST":
 
         CONFIG["dns_enabled"] = (
-            request.form.get("dns_enabled") == "on"
+            request.form.get(
+                "dns_enabled"
+            ) == "on"
         )
 
         configure_dns()
@@ -364,7 +645,9 @@ def dns():
             )
         )
 
-        return redirect(url_for("dns"))
+        return redirect(
+            url_for("dns")
+        )
 
     return render_template_string(
         HTML,
@@ -379,13 +662,18 @@ def dns():
 # Firewall
 # ============================================================
 
-@app.route("/firewall", methods=["GET", "POST"])
+@app.route(
+    "/firewall",
+    methods=["GET", "POST"]
+)
 def firewall():
 
     if request.method == "POST":
 
         CONFIG["firewall_enabled"] = (
-            request.form.get("firewall_enabled") == "on"
+            request.form.get(
+                "firewall_enabled"
+            ) == "on"
         )
 
         configure_firewall()
@@ -399,7 +687,9 @@ def firewall():
             )
         )
 
-        return redirect(url_for("firewall"))
+        return redirect(
+            url_for("firewall")
+        )
 
     return render_template_string(
         HTML,
@@ -414,13 +704,18 @@ def firewall():
 # VPN
 # ============================================================
 
-@app.route("/vpn", methods=["GET", "POST"])
+@app.route(
+    "/vpn",
+    methods=["GET", "POST"]
+)
 def vpn():
 
     if request.method == "POST":
 
         CONFIG["vpn_enabled"] = (
-            request.form.get("vpn_enabled") == "on"
+            request.form.get(
+                "vpn_enabled"
+            ) == "on"
         )
 
         configure_vpn()
@@ -434,7 +729,9 @@ def vpn():
             )
         )
 
-        return redirect(url_for("vpn"))
+        return redirect(
+            url_for("vpn")
+        )
 
     return render_template_string(
         HTML,
@@ -492,2079 +789,6 @@ def logs():
 
 
 # ============================================================
-# HTML
-# ============================================================
-
-HTML = """
-
-<!DOCTYPE html>
-
-<html>
-
-<head>
-
-    <meta charset="UTF-8">
-
-    <meta
-        name="viewport"
-        content="width=device-width, initial-scale=1.0"
-    >
-
-    <title>PiServer</title>
-
-
-    <style>
-
-        * {
-            box-sizing: border-box;
-        }
-
-
-        body {
-
-            margin: 0;
-
-            font-family:
-                -apple-system,
-                BlinkMacSystemFont,
-                "Segoe UI",
-                Arial,
-                sans-serif;
-
-            background: #f4f6f8;
-
-            color: #222;
-        }
-
-
-        .sidebar {
-
-            position: fixed;
-
-            left: 0;
-            top: 0;
-            bottom: 0;
-
-            width: 230px;
-
-            background: #111827;
-
-            color: white;
-
-            padding: 25px 15px;
-        }
-
-
-        .logo {
-
-            font-size: 25px;
-
-            font-weight: bold;
-
-            padding: 0 15px 30px 15px;
-        }
-
-
-        .nav {
-
-            display: flex;
-
-            flex-direction: column;
-
-            gap: 6px;
-        }
-
-
-        .nav a {
-
-            color: #d1d5db;
-
-            text-decoration: none;
-
-            padding: 12px 15px;
-
-            border-radius: 8px;
-
-            font-size: 15px;
-        }
-
-
-        .nav a:hover {
-
-            background: #1f2937;
-
-            color: white;
-        }
-
-
-        .nav a.active {
-
-            background: #374151;
-
-            color: white;
-        }
-
-
-        .main {
-
-            margin-left: 230px;
-
-            padding: 35px;
-
-            max-width: 1400px;
-        }
-
-
-        .header {
-
-            display: flex;
-
-            justify-content: space-between;
-
-            align-items: center;
-
-            margin-bottom: 30px;
-        }
-
-
-        .header h1 {
-
-            margin: 0;
-
-            font-size: 30px;
-        }
-
-
-        .status {
-
-            display: flex;
-
-            align-items: center;
-
-            gap: 8px;
-
-            font-size: 14px;
-
-            color: #555;
-        }
-
-
-        .status-dot {
-
-            width: 10px;
-            height: 10px;
-
-            border-radius: 50%;
-
-            background: #22c55e;
-        }
-
-
-        .cards {
-
-            display: grid;
-
-            grid-template-columns:
-                repeat(auto-fit, minmax(210px, 1fr));
-
-            gap: 18px;
-
-            margin-bottom: 25px;
-        }
-
-
-        .card {
-
-            background: white;
-
-            border-radius: 12px;
-
-            padding: 22px;
-
-            box-shadow:
-                0 2px 8px rgba(0, 0, 0, 0.06);
-        }
-
-
-        .card-title {
-
-            font-size: 14px;
-
-            color: #6b7280;
-
-            margin-bottom: 10px;
-        }
-
-
-        .card-value {
-
-            font-size: 27px;
-
-            font-weight: 600;
-        }
-
-
-        .green {
-            color: #16a34a;
-        }
-
-
-        .yellow {
-            color: #ca8a04;
-        }
-
-
-        .red {
-            color: #dc2626;
-        }
-
-
-        .section {
-
-            background: white;
-
-            border-radius: 12px;
-
-            padding: 25px;
-
-            margin-bottom: 25px;
-
-            box-shadow:
-                0 2px 8px rgba(0, 0, 0, 0.06);
-        }
-
-
-        .section h2 {
-
-            margin-top: 0;
-
-            margin-bottom: 20px;
-
-            font-size: 20px;
-        }
-
-
-        .form-group {
-            margin-bottom: 18px;
-        }
-
-
-        label {
-
-            display: block;
-
-            font-size: 14px;
-
-            font-weight: 500;
-
-            margin-bottom: 7px;
-        }
-
-
-        input,
-        select {
-
-            width: 100%;
-
-            padding: 11px 12px;
-
-            border: 1px solid #d1d5db;
-
-            border-radius: 7px;
-
-            font-size: 14px;
-
-            background: white;
-        }
-
-
-        input:focus,
-        select:focus {
-
-            outline: none;
-
-            border-color: #6b7280;
-        }
-
-
-        .button {
-
-            border: none;
-
-            background: #111827;
-
-            color: white;
-
-            padding: 11px 18px;
-
-            border-radius: 7px;
-
-            cursor: pointer;
-
-            font-size: 14px;
-        }
-
-
-        .button:hover {
-            background: #374151;
-        }
-
-
-        .toggle-row {
-
-            display: flex;
-
-            justify-content: space-between;
-
-            align-items: center;
-
-            padding: 15px 0;
-
-            border-bottom: 1px solid #eee;
-        }
-
-
-        .toggle-row:last-child {
-            border-bottom: none;
-        }
-
-
-        .toggle-switch {
-
-            position: relative;
-
-            width: 48px;
-            height: 26px;
-        }
-
-
-        .toggle-switch input {
-
-            opacity: 0;
-
-            width: 0;
-            height: 0;
-        }
-
-
-        .slider {
-
-            position: absolute;
-
-            cursor: pointer;
-
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-
-            background: #d1d5db;
-
-            border-radius: 30px;
-
-            transition: 0.2s;
-        }
-
-
-        .slider:before {
-
-            content: "";
-
-            position: absolute;
-
-            height: 20px;
-            width: 20px;
-
-            left: 3px;
-            top: 3px;
-
-            background: white;
-
-            border-radius: 50%;
-
-            transition: 0.2s;
-        }
-
-
-        .toggle-switch input:checked + .slider {
-            background: #22c55e;
-        }
-
-
-        .toggle-switch input:checked + .slider:before {
-            transform: translateX(22px);
-        }
-
-
-        .log-entry {
-
-            padding: 13px 0;
-
-            border-bottom: 1px solid #eee;
-
-            display: flex;
-
-            gap: 20px;
-        }
-
-
-        .log-time {
-
-            color: #6b7280;
-
-            font-size: 13px;
-
-            min-width: 160px;
-        }
-
-
-        .log-message {
-            font-size: 14px;
-        }
-
-
-        .info-grid {
-
-            display: grid;
-
-            grid-template-columns:
-                repeat(auto-fit, minmax(250px, 1fr));
-
-            gap: 15px;
-        }
-
-
-        .info-item {
-
-            padding: 15px;
-
-            background: #f9fafb;
-
-            border-radius: 8px;
-        }
-
-
-        .info-label {
-
-            font-size: 12px;
-
-            color: #6b7280;
-
-            margin-bottom: 5px;
-        }
-
-
-        .info-value {
-
-            font-size: 16px;
-
-            font-weight: 500;
-        }
-
-
-        @media (max-width: 700px) {
-
-            .sidebar {
-
-                width: 100%;
-
-                height: auto;
-
-                position: relative;
-            }
-
-
-            .nav {
-
-                flex-direction: row;
-
-                flex-wrap: wrap;
-            }
-
-
-            .main {
-
-                margin-left: 0;
-
-                padding: 20px;
-            }
-
-        }
-
-    </style>
-
-</head>
-
-
-<body>
-
-
-    <!-- Sidebar -->
-
-    <div class="sidebar">
-
-        <div class="logo">
-            PiServer
-        </div>
-
-
-        <div class="nav">
-
-            <a
-                href="/"
-                class="{% if page == 'dashboard' %}active{% endif %}"
-            >
-                Dashboard
-            </a>
-
-
-            <a
-                href="/network"
-                class="{% if page == 'network' %}active{% endif %}"
-            >
-                Network
-            </a>
-
-
-            <a
-                href="/dhcp"
-                class="{% if page == 'dhcp' %}active{% endif %}"
-            >
-                DHCP
-            </a>
-
-
-            <a
-                href="/dns"
-                class="{% if page == 'dns' %}active{% endif %}"
-            >
-                DNS
-            </a>
-
-
-            <a
-                href="/firewall"
-                class="{% if page == 'firewall' %}active{% endif %}"
-            >
-                Firewall
-            </a>
-
-
-            <a
-                href="/vpn"
-                class="{% if page == 'vpn' %}active{% endif %}"
-            >
-                VPN
-            </a>
-
-
-            <a
-                href="/monitoring"
-                class="{% if page == 'monitoring' %}active{% endif %}"
-            >
-                Monitoring
-            </a>
-
-
-            <a
-                href="/logs"
-                class="{% if page == 'logs' %}active{% endif %}"
-            >
-                Logs
-            </a>
-
-        </div>
-
-    </div>
-
-
-    <!-- Main -->
-
-    <div class="main">
-
-
-        <div class="header">
-
-            <h1>
-
-                {% if page == "dashboard" %}
-                    Dashboard
-                {% elif page == "network" %}
-                    Network
-                {% elif page == "dhcp" %}
-                    DHCP
-                {% elif page == "dns" %}
-                    DNS
-                {% elif page == "firewall" %}
-                    Firewall
-                {% elif page == "vpn" %}
-                    VPN
-                {% elif page == "monitoring" %}
-                    Monitoring
-                {% elif page == "logs" %}
-                    Logs
-                {% endif %}
-
-            </h1>
-
-
-            <div class="status">
-
-                <div class="status-dot"></div>
-
-                PiServer Online
-
-            </div>
-
-        </div>
-
-
-        <!-- ================================================= -->
-        <!-- DASHBOARD -->
-        <!-- ================================================= -->
-
-        {% if page == "dashboard" %}
-
-
-            <div class="cards">
-
-
-                <div class="card">
-
-                    <div class="card-title">
-                        CPU Usage
-                    </div>
-
-                    <div
-                        class="card-value"
-                        id="dashboard-cpu-usage"
-                    >
-
-                        {% if health.system.cpu_usage is not none %}
-                            {{ "%.1f"|format(health.system.cpu_usage) }}%
-                        {% else %}
-                            --
-                        {% endif %}
-
-                    </div>
-
-                </div>
-
-
-                <div class="card">
-
-                    <div class="card-title">
-                        Memory
-                    </div>
-
-                    <div
-                        class="card-value"
-                        id="dashboard-memory-usage"
-                    >
-
-                        {% if health.system.memory_usage is not none %}
-                            {{ "%.1f"|format(health.system.memory_usage) }}%
-                        {% else %}
-                            --
-                        {% endif %}
-
-                    </div>
-
-                </div>
-
-
-                <div class="card">
-
-                    <div class="card-title">
-                        Temperature
-                    </div>
-
-                    <div
-                        class="card-value"
-                        id="dashboard-temperature"
-                    >
-
-                        {% if health.system.temperature is not none %}
-                            {{ "%.1f"|format(health.system.temperature) }} °C
-                        {% else %}
-                            --
-                        {% endif %}
-
-                    </div>
-
-                </div>
-
-
-                <div class="card">
-
-                    <div class="card-title">
-                        TCP Connections
-                    </div>
-
-                    <div
-                        class="card-value"
-                        id="dashboard-connections"
-                    >
-
-                        {% if health.connections is not none %}
-                            {{ health.connections }}
-                        {% else %}
-                            --
-                        {% endif %}
-
-                    </div>
-
-                </div>
-
-
-            </div>
-
-
-            <div class="section">
-
-                <h2>
-                    Gateway Services
-                </h2>
-
-
-                <div class="info-grid">
-
-
-                    <div class="info-item">
-
-                        <div class="info-label">
-                            SSH
-                        </div>
-
-                        <div
-                            class="info-value"
-                            id="dashboard-ssh-status"
-                        >
-
-                            {% if health.services.ssh == "active" %}
-
-                                <span class="green">
-                                    Active
-                                </span>
-
-                            {% else %}
-
-                                <span class="red">
-                                    {{ health.services.ssh }}
-                                </span>
-
-                            {% endif %}
-
-                        </div>
-
-                    </div>
-
-
-                    <div class="info-item">
-
-                        <div class="info-label">
-                            WireGuard
-                        </div>
-
-                        <div
-                            class="info-value"
-                            id="dashboard-wireguard-status"
-                        >
-
-                            {% if health.services.wireguard == "active" %}
-
-                                <span class="green">
-                                    Active
-                                </span>
-
-                            {% else %}
-
-                                <span class="yellow">
-                                    {{ health.services.wireguard }}
-                                </span>
-
-                            {% endif %}
-
-                        </div>
-
-                    </div>
-
-
-                </div>
-
-            </div>
-
-
-        <!-- ================================================= -->
-        <!-- NETWORK -->
-        <!-- ================================================= -->
-
-        {% elif page == "network" %}
-
-
-            <div class="section">
-
-                <h2>
-                    Network Configuration
-                </h2>
-
-
-                <form method="POST">
-
-
-                    <div class="form-group">
-
-                        <label>
-                            Hostname
-                        </label>
-
-                        <input
-                            type="text"
-                            name="hostname"
-                            value="{{ config.hostname }}"
-                        >
-
-                    </div>
-
-
-                    <div class="form-group">
-
-                        <label>
-                            Interface
-                        </label>
-
-                        <input
-                            type="text"
-                            name="interface"
-                            value="{{ config.interface }}"
-                        >
-
-                    </div>
-
-
-                    <div class="form-group">
-
-                        <label>
-                            Mode
-                        </label>
-
-                        <select name="mode">
-
-                            <option
-                                value="gateway"
-                                {% if config.mode == "gateway" %}
-                                selected
-                                {% endif %}
-                            >
-                                Gateway
-                            </option>
-
-                            <option
-                                value="router"
-                                {% if config.mode == "router" %}
-                                selected
-                                {% endif %}
-                            >
-                                Router
-                            </option>
-
-                            <option
-                                value="access_point"
-                                {% if config.mode == "access_point" %}
-                                selected
-                                {% endif %}
-                            >
-                                Access Point
-                            </option>
-
-                        </select>
-
-                    </div>
-
-
-                    <div class="form-group">
-
-                        <label>
-                            IP Address
-                        </label>
-
-                        <input
-                            type="text"
-                            name="ip_address"
-                            value="{{ config.ip_address }}"
-                            placeholder="192.168.1.1"
-                        >
-
-                    </div>
-
-
-                    <div class="form-group">
-
-                        <label>
-                            Gateway
-                        </label>
-
-                        <input
-                            type="text"
-                            name="gateway"
-                            value="{{ config.gateway }}"
-                            placeholder="192.168.1.1"
-                        >
-
-                    </div>
-
-
-                    <div class="form-group">
-
-                        <label>
-                            Netmask
-                        </label>
-
-                        <input
-                            type="text"
-                            name="netmask"
-                            value="{{ config.netmask }}"
-                        >
-
-                    </div>
-
-
-                    <div class="form-group">
-
-                        <label>
-                            DNS Server
-                        </label>
-
-                        <input
-                            type="text"
-                            name="dns"
-                            value="{{ config.dns }}"
-                            placeholder="1.1.1.1"
-                        >
-
-                    </div>
-
-
-                    <button
-                        type="submit"
-                        class="button"
-                    >
-                        Save Network Configuration
-                    </button>
-
-
-                </form>
-
-            </div>
-            <div class="section">
-
-                <h2>
-                    Live Network Status
-                </h2>
-
-                {% if network_status.error %}
-
-                    <div class="info-item">
-                        <div class="info-label">
-                            Error
-                        </div>
-
-                        <div class="info-value red">
-                            {{ network_status.error }}
-                        </div>
-                    </div>
-
-                {% else %}
-
-                    <div class="section">
-
-                        <h2>
-                            Interfaces
-                        </h2>
-
-                        <div style="overflow-x: auto;">
-
-                            <table style="
-                                width: 100%;
-                                border-collapse: collapse;
-                                font-size: 14px;
-                            ">
-
-                                <thead>
-
-                                    <tr>
-                                        <th style="text-align: left; padding: 10px;">
-                                            Name
-                                        </th>
-
-                                        <th style="text-align: left; padding: 10px;">
-                                            Type
-                                        </th>
-
-                                        <th style="text-align: left; padding: 10px;">
-                                            Status
-                                        </th>
-
-                                        <th style="text-align: left; padding: 10px;">
-                                            MAC
-                                        </th>
-
-                                        <th style="text-align: left; padding: 10px;">
-                                            Addresses
-                                        </th>
-                                    </tr>
-
-                                </thead>
-
-                                <tbody>
-
-                                    {% for name, interface in network_status.interfaces.items() %}
-
-                                        <tr>
-
-                                            <td style="padding: 10px;">
-                                                {{ name }}
-                                            </td>
-
-                                            <td style="padding: 10px;">
-                                                {{ interface.type or "--" }}
-                                            </td>
-
-                                            <td style="padding: 10px;">
-
-                                                {% if interface.status == "up" %}
-
-                                                    <span class="green">
-                                                        UP
-                                                    </span>
-
-                                                {% elif interface.status == "down" %}
-
-                                                    <span class="red">
-                                                        DOWN
-                                                    </span>
-
-                                                {% else %}
-
-                                                    <span class="yellow">
-                                                        {{ interface.status or "UNKNOWN" }}
-                                                    </span>
-
-                                                {% endif %}
-
-                                            </td>
-
-                                            <td style="padding: 10px;">
-                                                {{ interface.mac or "--" }}
-                                            </td>
-
-                                            <td style="padding: 10px;">
-
-                                                {% if interface.addresses %}
-
-                                                    {{ interface.addresses|join(", ") }}
-
-                                                {% else %}
-
-                                                    --
-
-                                                {% endif %}
-
-                                            </td>
-
-                                        </tr>
-
-                                    {% endfor %}
-
-                                </tbody>
-
-                            </table>
-
-                        </div>
-
-                    </div>
-
-
-                    <div class="section">
-
-                        <h2>
-                            Routing Table
-                        </h2>
-
-                        {% if network_status.routes %}
-
-                            {% for route in network_status.routes %}
-
-                                <div class="info-item" style="margin-bottom: 8px;">
-                                    {{ route }}
-                                </div>
-
-                            {% endfor %}
-
-                        {% else %}
-
-                            <div class="info-label">
-                                No routes found.
-                            </div>
-
-                        {% endif %}
-
-                    </div>
-
-                {% endif %}
-
-            </div>
-
-        <!-- ================================================= -->
-        <!-- DHCP -->
-        <!-- ================================================= -->
-
-        {% elif page == "dhcp" %}
-
-
-            <div class="section">
-
-                <h2>
-                    DHCP Server
-                </h2>
-
-
-                <form method="POST">
-
-
-                    <div class="toggle-row">
-
-                        <div>
-
-                            <strong>
-                                DHCP Server
-                            </strong>
-
-                            <div class="info-label">
-                                Automatically assign IP addresses
-                            </div>
-
-                        </div>
-
-
-                        <label class="toggle-switch">
-
-                            <input
-                                type="checkbox"
-                                name="dhcp_enabled"
-                                {% if config.dhcp_enabled %}
-                                checked
-                                {% endif %}
-                            >
-
-                            <span class="slider"></span>
-
-                        </label>
-
-                    </div>
-
-
-                    <br>
-
-
-                    <button
-                        type="submit"
-                        class="button"
-                    >
-                        Save DHCP Configuration
-                    </button>
-
-
-                </form>
-
-            </div>
-
-
-        <!-- ================================================= -->
-        <!-- DNS -->
-        <!-- ================================================= -->
-
-        {% elif page == "dns" %}
-
-
-            <div class="section">
-
-                <h2>
-                    DNS
-                </h2>
-
-
-                <form method="POST">
-
-
-                    <div class="toggle-row">
-
-                        <div>
-
-                            <strong>
-                                DNS Service
-                            </strong>
-
-                            <div class="info-label">
-                                Enable PiServer DNS functionality
-                            </div>
-
-                        </div>
-
-
-                        <label class="toggle-switch">
-
-                            <input
-                                type="checkbox"
-                                name="dns_enabled"
-                                {% if config.dns_enabled %}
-                                checked
-                                {% endif %}
-                            >
-
-                            <span class="slider"></span>
-
-                        </label>
-
-                    </div>
-
-
-                    <br>
-
-
-                    <button
-                        type="submit"
-                        class="button"
-                    >
-                        Save DNS Configuration
-                    </button>
-
-
-                </form>
-
-            </div>
-
-
-        <!-- ================================================= -->
-        <!-- FIREWALL -->
-        <!-- ================================================= -->
-
-        {% elif page == "firewall" %}
-
-
-            <div class="section">
-
-                <h2>
-                    Firewall
-                </h2>
-
-
-                <form method="POST">
-
-
-                    <div class="toggle-row">
-
-                        <div>
-
-                            <strong>
-                                Firewall
-                            </strong>
-
-                            <div class="info-label">
-                                Enable gateway firewall protection
-                            </div>
-
-                        </div>
-
-
-                        <label class="toggle-switch">
-
-                            <input
-                                type="checkbox"
-                                name="firewall_enabled"
-                                {% if config.firewall_enabled %}
-                                checked
-                                {% endif %}
-                            >
-
-                            <span class="slider"></span>
-
-                        </label>
-
-                    </div>
-
-
-                    <br>
-
-
-                    <button
-                        type="submit"
-                        class="button"
-                    >
-                        Save Firewall Configuration
-                    </button>
-
-
-                </form>
-
-            </div>
-
-
-        <!-- ================================================= -->
-        <!-- VPN -->
-        <!-- ================================================= -->
-
-        {% elif page == "vpn" %}
-
-
-            <div class="section">
-
-                <h2>
-                    VPN
-                </h2>
-
-
-                <form method="POST">
-
-
-                    <div class="toggle-row">
-
-                        <div>
-
-                            <strong>
-                                WireGuard VPN
-                            </strong>
-
-                            <div class="info-label">
-                                Enable WireGuard VPN gateway
-                            </div>
-
-                        </div>
-
-
-                        <label class="toggle-switch">
-
-                            <input
-                                type="checkbox"
-                                name="vpn_enabled"
-                                {% if config.vpn_enabled %}
-                                checked
-                                {% endif %}
-                            >
-
-                            <span class="slider"></span>
-
-                        </label>
-
-                    </div>
-
-
-                    <br>
-
-
-                    <button
-                        type="submit"
-                        class="button"
-                    >
-                        Save VPN Configuration
-                    </button>
-
-
-                </form>
-
-            </div>
-
-
-        <!-- ================================================= -->
-        <!-- MONITORING -->
-        <!-- ================================================= -->
-
-        {% elif page == "monitoring" %}
-
-
-            <div class="cards">
-
-
-                <div class="card">
-
-                    <div class="card-title">
-                        CPU Usage
-                    </div>
-
-                    <div
-                        class="card-value"
-                        id="cpu-usage"
-                    >
-
-                        {% if health.system.cpu_usage is not none %}
-                            {{ "%.1f"|format(health.system.cpu_usage) }}%
-                        {% else %}
-                            --
-                        {% endif %}
-
-                    </div>
-
-                </div>
-
-
-                <div class="card">
-
-                    <div class="card-title">
-                        Memory
-                    </div>
-
-                    <div
-                        class="card-value"
-                        id="memory-usage"
-                    >
-
-                        {% if health.system.memory_usage is not none %}
-                            {{ "%.1f"|format(health.system.memory_usage) }}%
-                        {% else %}
-                            --
-                        {% endif %}
-
-                    </div>
-
-                </div>
-
-
-                <div class="card">
-
-                    <div class="card-title">
-                        Storage
-                    </div>
-
-                    <div
-                        class="card-value"
-                        id="storage-usage"
-                    >
-
-                        {% if health.system.storage_usage is not none %}
-                            {{ "%.1f"|format(health.system.storage_usage) }}%
-                        {% else %}
-                            --
-                        {% endif %}
-
-                    </div>
-
-                </div>
-
-
-                <div class="card">
-
-                    <div class="card-title">
-                        Temperature
-                    </div>
-
-                    <div
-                        class="card-value"
-                        id="temperature"
-                    >
-
-                        {% if health.system.temperature is not none %}
-                            {{ "%.1f"|format(health.system.temperature) }} °C
-                        {% else %}
-                            --
-                        {% endif %}
-
-                    </div>
-
-                </div>
-
-
-            </div>
-
-
-            <div class="cards">
-
-
-                <div class="card">
-
-                    <div class="card-title">
-                        TCP Connections
-                    </div>
-
-                    <div
-                        class="card-value"
-                        id="connections"
-                    >
-
-                        {% if health.connections is not none %}
-                            {{ health.connections }}
-                        {% else %}
-                            --
-                        {% endif %}
-
-                    </div>
-
-                </div>
-
-
-                <div class="card">
-
-                    <div class="card-title">
-                        VPN
-                    </div>
-
-                    <div
-                        class="card-value"
-                        id="vpn-status"
-                    >
-
-                        {{ health.vpn.status }}
-
-                    </div>
-
-                </div>
-
-
-                <div class="card">
-
-                    <div class="card-title">
-                        DNS
-                    </div>
-
-                    <div
-                        class="card-value"
-                        id="dns-status"
-                    >
-
-                        {% if health.dns %}
-                            {{ health.dns.status }}
-                        {% else %}
-                            unknown
-                        {% endif %}
-
-                    </div>
-
-                </div>
-
-
-                <div class="card">
-
-                    <div class="card-title">
-                        DHCP
-                    </div>
-
-                    <div
-                        class="card-value"
-                        id="dhcp-status"
-                    >
-
-                        {% if health.dhcp %}
-                            {{ health.dhcp.status }}
-                        {% else %}
-                            unknown
-                        {% endif %}
-
-                    </div>
-
-                </div>
-
-
-            </div>
-
-
-            <div class="section">
-
-                <h2>
-                    Gateway Services
-                </h2>
-
-
-                <div class="info-grid">
-
-
-                    <div class="info-item">
-
-                        <div class="info-label">
-                            SSH
-                        </div>
-
-                        <div
-                            class="info-value"
-                            id="ssh-status"
-                        >
-
-                            {{ health.services.ssh }}
-
-                        </div>
-
-                    </div>
-
-
-                    <div class="info-item">
-
-                        <div class="info-label">
-                            WireGuard
-                        </div>
-
-                        <div
-                            class="info-value"
-                            id="wireguard-status"
-                        >
-
-                            {{ health.services.wireguard }}
-
-                        </div>
-
-                    </div>
-
-
-                    <div class="info-item">
-
-                        <div class="info-label">
-                            System Uptime
-                        </div>
-
-                        <div
-                            class="info-value"
-                            id="uptime"
-                        >
-
-                            {% if health.system.uptime is not none %}
-
-                                {{ "%.0f"|format(
-                                    health.system.uptime
-                                ) }} seconds
-
-                            {% else %}
-
-                                --
-
-                            {% endif %}
-
-                        </div>
-
-                    </div>
-
-
-                </div>
-
-            </div>
-
-
-        <!-- ================================================= -->
-        <!-- LOGS -->
-        <!-- ================================================= -->
-
-        {% elif page == "logs" %}
-
-
-            <div class="section">
-
-                <h2>
-                    System Logs
-                </h2>
-
-
-                {% if logs %}
-
-                    {% for log in logs %}
-
-                        <div class="log-entry">
-
-                            <div class="log-time">
-                                {{ log.time }}
-                            </div>
-
-                            <div class="log-message">
-                                {{ log.message }}
-                            </div>
-
-                        </div>
-
-                    {% endfor %}
-
-                {% else %}
-
-                    <div class="info-label">
-                        No logs yet.
-                    </div>
-
-                {% endif %}
-
-
-            </div>
-
-
-        {% endif %}
-
-
-    </div>
-
-
-    <!-- ===================================================== -->
-    <!-- LIVE MONITORING JAVASCRIPT -->
-    <!-- ===================================================== -->
-
-    <script>
-
-        async function updatePage() {
-
-            try {
-
-                const response = await fetch(
-                    "/api/monitoring",
-                    {
-                        cache: "no-store"
-                    }
-                );
-
-
-                if (!response.ok) {
-
-                    throw new Error(
-                        "HTTP " + response.status
-                    );
-
-                }
-
-
-                const health =
-                    await response.json();
-
-
-                // =================================================
-                // DASHBOARD
-                // =================================================
-
-                const dashboardCPU =
-                    document.getElementById(
-                        "dashboard-cpu-usage"
-                    );
-
-                if (
-                    dashboardCPU &&
-                    health.system.cpu_usage !== null
-                ) {
-
-                    dashboardCPU.textContent =
-                        health.system.cpu_usage.toFixed(1)
-                        + "%";
-
-                }
-
-
-                const dashboardMemory =
-                    document.getElementById(
-                        "dashboard-memory-usage"
-                    );
-
-                if (
-                    dashboardMemory &&
-                    health.system.memory_usage !== null
-                ) {
-
-                    dashboardMemory.textContent =
-                        health.system.memory_usage.toFixed(1)
-                        + "%";
-
-                }
-
-
-                const dashboardTemperature =
-                    document.getElementById(
-                        "dashboard-temperature"
-                    );
-
-                if (
-                    dashboardTemperature &&
-                    health.system.temperature !== null
-                ) {
-
-                    dashboardTemperature.textContent =
-                        health.system.temperature.toFixed(1)
-                        + " °C";
-
-                }
-
-
-                const dashboardConnections =
-                    document.getElementById(
-                        "dashboard-connections"
-                    );
-
-                if (
-                    dashboardConnections &&
-                    health.connections !== null
-                ) {
-
-                    dashboardConnections.textContent =
-                        health.connections;
-
-                }
-
-
-                const dashboardSSH =
-                    document.getElementById(
-                        "dashboard-ssh-status"
-                    );
-
-                if (dashboardSSH) {
-
-                    if (
-                        health.services.ssh === "active"
-                    ) {
-
-                        dashboardSSH.innerHTML =
-                            '<span class="green">Active</span>';
-
-                    } else {
-
-                        dashboardSSH.innerHTML =
-                            '<span class="red">'
-                            + health.services.ssh
-                            + '</span>';
-
-                    }
-
-                }
-
-
-                const dashboardWireGuard =
-                    document.getElementById(
-                        "dashboard-wireguard-status"
-                    );
-
-                if (dashboardWireGuard) {
-
-                    if (
-                        health.services.wireguard === "active"
-                    ) {
-
-                        dashboardWireGuard.innerHTML =
-                            '<span class="green">Active</span>';
-
-                    } else {
-
-                        dashboardWireGuard.innerHTML =
-                            '<span class="yellow">'
-                            + health.services.wireguard
-                            + '</span>';
-
-                    }
-
-                }
-
-
-                // =================================================
-                // MONITORING PAGE
-                // =================================================
-
-                const cpu =
-                    document.getElementById(
-                        "cpu-usage"
-                    );
-
-                if (
-                    cpu &&
-                    health.system.cpu_usage !== null
-                ) {
-
-                    cpu.textContent =
-                        health.system.cpu_usage.toFixed(1)
-                        + "%";
-
-                }
-
-
-                const memory =
-                    document.getElementById(
-                        "memory-usage"
-                    );
-
-                if (
-                    memory &&
-                    health.system.memory_usage !== null
-                ) {
-
-                    memory.textContent =
-                        health.system.memory_usage.toFixed(1)
-                        + "%";
-
-                }
-
-
-                const storage =
-                    document.getElementById(
-                        "storage-usage"
-                    );
-
-                if (
-                    storage &&
-                    health.system.storage_usage !== null
-                ) {
-
-                    storage.textContent =
-                        health.system.storage_usage.toFixed(1)
-                        + "%";
-
-                }
-
-
-                const temperature =
-                    document.getElementById(
-                        "temperature"
-                    );
-
-                if (
-                    temperature &&
-                    health.system.temperature !== null
-                ) {
-
-                    temperature.textContent =
-                        health.system.temperature.toFixed(1)
-                        + " °C";
-
-                }
-
-
-                const connections =
-                    document.getElementById(
-                        "connections"
-                    );
-
-                if (
-                    connections &&
-                    health.connections !== null
-                ) {
-
-                    connections.textContent =
-                        health.connections;
-
-                }
-
-
-                const vpn =
-                    document.getElementById(
-                        "vpn-status"
-                    );
-
-                if (vpn) {
-
-                    vpn.textContent =
-                        health.vpn.status;
-
-                }
-
-
-                const dns =
-                    document.getElementById(
-                        "dns-status"
-                    );
-
-                if (dns) {
-
-                    dns.textContent =
-                        health.dns
-                        ? health.dns.status
-                        : "unknown";
-
-                }
-
-
-                const dhcp =
-                    document.getElementById(
-                        "dhcp-status"
-                    );
-
-                if (dhcp) {
-
-                    dhcp.textContent =
-                        health.dhcp
-                        ? health.dhcp.status
-                        : "unknown";
-
-                }
-
-
-                const ssh =
-                    document.getElementById(
-                        "ssh-status"
-                    );
-
-                if (ssh) {
-
-                    ssh.textContent =
-                        health.services.ssh;
-
-                }
-
-
-                const wireguard =
-                    document.getElementById(
-                        "wireguard-status"
-                    );
-
-                if (wireguard) {
-
-                    wireguard.textContent =
-                        health.services.wireguard;
-
-                }
-
-
-                const uptime =
-                    document.getElementById(
-                        "uptime"
-                    );
-
-                if (
-                    uptime &&
-                    health.system.uptime !== null
-                ) {
-
-                    uptime.textContent =
-                        Math.round(
-                            health.system.uptime
-                        )
-                        + " seconds";
-
-                }
-
-            }
-
-            catch (error) {
-
-                console.error(
-                    "PiServer monitoring update failed:",
-                    error
-                );
-
-            }
-
-        }
-
-
-        // =================================================
-        // Initial update
-        // =================================================
-
-        updatePage();
-
-
-        // =================================================
-        // Update every 1 second
-        // =================================================
-
-        setInterval(
-            updatePage,
-            1000
-        );
-
-    </script>
-
-
-</body>
-
-</html>
-
-"""
-
-
-# ============================================================
 # Main
 # ============================================================
 
@@ -2592,7 +816,6 @@ def main():
 
     print("")
 
-
     app.run(
         host="0.0.0.0",
         port=80,
@@ -2603,4 +826,63 @@ def main():
 
 if __name__ == "__main__":
     main()
+```
 
+**Keep your existing `HTML = """ ... """` section exactly as it is** and place it between the `/logs` route and `# Main` section above.
+
+One additional change is needed in your **Network HTML** if you want the NAT toggle to appear. Inside the `/network` form, add:
+
+```html
+<div class="toggle-row">
+
+    <div>
+        <strong>
+            NAT / Internet Sharing
+        </strong>
+
+        <div class="info-label">
+            Masquerade LAN traffic through the WAN interface
+        </div>
+    </div>
+
+    <label class="toggle-switch">
+
+        <input
+            type="checkbox"
+            name="nat_enabled"
+            {% if config.nat_enabled %}
+            checked
+            {% endif %}
+        >
+
+        <span class="slider"></span>
+
+    </label>
+
+</div>
+```
+
+Then your flow becomes:
+
+```text
+Browser
+   ↓
+network_gui.py
+   ↓
+configure_nat()
+   ↓
+nat.py
+   ↓
+nft
+   ↓
+Linux NAT
+```
+
+And your configuration is persisted through:
+
+```text
+GUI
+ ↓
+gateway.yaml
+ ↓
+nat_enabled: true
