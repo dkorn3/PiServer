@@ -1,3 +1,30 @@
+                    systemd
+                       │
+                       ▼
+                   main.py
+                Main Coordinator
+                       │
+        ┌──────────────┼──────────────┐
+        ▼              ▼              ▼
+   network.py      firewall.py      nat.py
+        │              │              │
+        ▼              ▼              ▼
+     dhcp.py         dns.py         vpn.py
+        │              │              │
+        └──────────────┼──────────────┘
+                       ▼
+                  Linux system
+
+                       ▲
+                       │
+                network_gui.py
+                  Web Interface
+                       ▲
+                       │
+                    Browser
+
+
+
 # Portable Security Gateway
 
 ## 1. System Overview
