@@ -1,26 +1,22 @@
-                    systemd
-                       │
-                       ▼
-                   main.py
-                Main Coordinator
-                       │
-        ┌──────────────┼──────────────┐
-                                    
-   network.py      firewall.py      nat.py
-        │              │              
-     dhcp.py         dns.py         vpn.py
-        │              │              │
-        └──────────────┼──────────────┘
-                       
-                  Linux system
+systemd
+   │
+   ▼
+main.py
+   │
+   ├── network.py
+   ├── nat.py
+   ├── firewall.py
+   ├── dhcp.py
+   ├── dns.py
+   ├── vpn.py
+   └── monitoring.py
+   │
+   ▼
+network_gui.py
+   │
+   ▼
+Flask :80
 
-                       ▲
-                       │
-                network_gui.py
-                  Web Interface
-                       ▲
-                       │
-                    Browser
 
 
 
