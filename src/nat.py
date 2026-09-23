@@ -1,11 +1,25 @@
 
+"""
+PiServer NAT management.
+
+Provides IPv4 masquerading for traffic leaving the
+PiServer LAN through the WAN interface.
+"""
+
 import subprocess
 
 from config import load_config
 
 
+# ============================================================
+# Command Helper
+# ============================================================
+
 def _run(command):
-    """Run a system command and return the completed process."""
+    """
+    Run a system command and return the completed process.
+    """
+
     return subprocess.run(
         command,
         capture_output=True,
@@ -14,8 +28,15 @@ def _run(command):
     )
 
 
+# ============================================================
+# Configuration
+# ============================================================
+
 def _get_network_settings():
-    """Load WAN/LAN settings from the PiServer configuration."""
+    """
+    Load WAN/LAN settings from PiServer configuration.
+    """
+
     config = load_config()
     network = config["network"]
 
@@ -26,21 +47,38 @@ def _get_network_settings():
     }
 
 
+# ============================================================
+# NAT Configuration
+# ============================================================
+
 def configure_nat():
     """
     Configure IPv4 masquerading for PiServer LAN traffic.
 
-    Traffic originating from the LAN subnet is NATed when
-    leaving through the WAN interface.
+    LAN traffic from the configured subnet is masqueraded
+    when leaving through the WAN interface.
+
+    The configuration is idempotent, meaning calling this
+    function multiple times will not create duplicate rules.
     """
+
     settings = _get_network_settings()
 
     wan_interface = settings["wan_interface"]
     lan_network = settings["lan_network"]
 
-    # Create the PiServer NAT table.
+    # --------------------------------------------------------
+    # Create NAT table if it does not already exist
+    # --------------------------------------------------------
+
     result = _run(
-        ["nft", "add", "table", "ip", "piserver_nat"]
+        [
+            "nft",
+            "add",
+            "table",
+            "ip",
+            "piserver_nat",
+        ]
     )
 
     if result.returncode != 0:
@@ -50,7 +88,10 @@ def configure_nat():
                 or "Failed to create NAT table"
             )
 
-    # Create the postrouting chain.
+    # --------------------------------------------------------
+    # Create postrouting chain if it does not exist
+    # --------------------------------------------------------
+
     result = _run(
         [
             "nft",
@@ -81,26 +122,46 @@ def configure_nat():
                 or "Failed to create NAT postrouting chain"
             )
 
-    # Masquerade LAN traffic leaving through the WAN.
-    result = _run(
+    # --------------------------------------------------------
+    # Check whether masquerade rule already exists
+    # --------------------------------------------------------
+
+    rules = _run(
         [
             "nft",
-            "add",
-            "rule",
+            "list",
+            "chain",
             "ip",
             "piserver_nat",
             "postrouting",
-            "oifname",
-            wan_interface,
-            "ip",
-            "saddr",
-            lan_network,
-            "masquerade",
         ]
     )
 
-    if result.returncode != 0:
-        if "exists" not in result.stderr.lower():
+    expected_rule = (
+        f'oifname "{wan_interface}" '
+        f'ip saddr {lan_network} masquerade'
+    )
+
+    if expected_rule not in rules.stdout:
+
+        result = _run(
+            [
+                "nft",
+                "add",
+                "rule",
+                "ip",
+                "piserver_nat",
+                "postrouting",
+                "oifname",
+                wan_interface,
+                "ip",
+                "saddr",
+                lan_network,
+                "masquerade",
+            ]
+        )
+
+        if result.returncode != 0:
             raise RuntimeError(
                 result.stderr.strip()
                 or "Failed to create NAT masquerade rule"
@@ -109,10 +170,23 @@ def configure_nat():
     return get_nat_status()
 
 
+# ============================================================
+# NAT Status
+# ============================================================
+
 def get_nat_status():
-    """Return the current PiServer NAT configuration."""
+    """
+    Return the current PiServer NAT configuration.
+    """
+
     result = _run(
-        ["nft", "list", "table", "ip", "piserver_nat"]
+        [
+            "nft",
+            "list",
+            "table",
+            "ip",
+            "piserver_nat",
+        ]
     )
 
     return {
@@ -126,14 +200,34 @@ def get_nat_status():
     }
 
 
+# ============================================================
+# NAT Disable
+# ============================================================
+
 def disable_nat():
-    """Remove the PiServer NAT table."""
+    """
+    Remove the PiServer NAT table.
+
+    Deleting the table removes the NAT chain and all
+    masquerade rules belonging to PiServer.
+    """
+
     result = _run(
-        ["nft", "delete", "table", "ip", "piserver_nat"]
+        [
+            "nft",
+            "delete",
+            "table",
+            "ip",
+            "piserver_nat",
+        ]
     )
 
     if result.returncode != 0:
-        if "does not exist" in result.stderr.lower():
+
+        if (
+            "does not exist"
+            in result.stderr.lower()
+        ):
             return True
 
         raise RuntimeError(
@@ -144,17 +238,27 @@ def disable_nat():
     return True
 
 
+# ============================================================
+# Standalone Test
+# ============================================================
+
 if __name__ == "__main__":
-    print("=== PiServer NAT ===")
 
-    try:
-        status = configure_nat()
+    print("PiServer NAT status:")
 
-        print(f"NAT enabled: {status['enabled']}")
+    status = get_nat_status()
 
-        if status["rules"]:
-            print(status["rules"])
+    print(
+        f"Enabled: {status['enabled']}"
+    )
 
-    except (OSError, RuntimeError, ValueError) as exc:
-        print(f"NAT configuration failed: {exc}")
-        raise SystemExit(1)
+    if status["rules"]:
+        print()
+        print(status["rules"])
+
+    if status["error"]:
+        print()
+        print(
+            f"Error: {status['error']}"
+        )
+
