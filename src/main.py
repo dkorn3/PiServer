@@ -68,33 +68,29 @@ def load_gateway_config():
 
 def initialize_network():
     """
-    Configure the PiServer LAN and forwarding.
+    Initialize the PiServer network
+ configuration.
+
+    The network module owns the actual interface configuration.
+    main.py coordinates the operation.
     """
 
     gateway_config = _gateway_config
 
-    lan = gateway_config[
-        "network"
-    ][
-        "lan_interface"
-    ]
+    lan = gateway_config["network"]["lan_interface"]
+    wan = gateway_config["network"]["wan_interface"]
 
-    lan_address = gateway_config[
-        "network"
-    ][
-        "lan_address"
-    ]
-
-    network.bring_interface_up(
-        lan
+    app_logging.log_info(
+        f"Configuring network: WAN={wan}, LAN={lan}"
     )
 
-    network.configure_lan_address(
-        lan,
-        lan_address,
+    network.configure_router()
+
+    app_logging.log_info(
+        "Network configuration completed."
     )
 
-    network.enable_ipv4_forwarding()
+    return True
 
 
 # ============================================================
