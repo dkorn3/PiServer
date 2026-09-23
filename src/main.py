@@ -1,94 +1,478 @@
+
+
+"""
+PiServer main coordinator.
+
+This file is the main entry point for PiServer.
+
+Responsibilities:
+    1. Load and validate configuration
+    2. Configure the LAN interface
+    3. Enable IPv4 forwarding
+    4. Configure NAT when enabled
+    5. Configure firewall when enabled
+    6. Configure DHCP when enabled
+    7. Configure DNS
+    8. Start VPN when enabled
+    9. Start the PiServer web GUI
+   10. Shut down services cleanly
+"""
+
 import config
 import network
 import dns
 import dhcp
 import firewall
 import monitoring
-import logging
+import nat
+import app_logging
 
 try:
     import vpn
 except ImportError:
     vpn = None
 
+try:
+    from network_gui import app
+except ImportError:
+    app = None
+
 
 _running = False
 _gateway_config = None
 
 
-def initialize_gateway():
-    global _running, _gateway_config
+# ============================================================
+# Configuration
+# ============================================================
+
+def load_gateway_config():
+    """
+    Load and validate the PiServer configuration.
+    """
+
+    global _gateway_config
 
     _gateway_config = config.load_config()
-    config.validate_config(_gateway_config)
 
-    logging.configure_logging()
-    logging.log_info("Gateway initialization started.")
+    config.validate_config(
+        _gateway_config
+    )
 
-    lan = _gateway_config["network"]["lan_interface"]
-    wan = _gateway_config["network"]["wan_interface"]
+    return _gateway_config
 
-    network.bring_interface_up(lan)
+
+# ============================================================
+# Network Initialization
+# ============================================================
+
+def initialize_network():
+    """
+    Configure the PiServer LAN and forwarding.
+    """
+
+    gateway_config = _gateway_config
+
+    lan = gateway_config[
+        "network"
+    ][
+        "lan_interface"
+    ]
+
+    lan_address = gateway_config[
+        "network"
+    ][
+        "lan_address"
+    ]
+
+    network.bring_interface_up(
+        lan
+    )
+
     network.configure_lan_address(
         lan,
-        _gateway_config["network"]["lan_address"],
+        lan_address,
     )
+
     network.enable_ipv4_forwarding()
 
-    if _gateway_config["firewall"].get("enabled", True):
-        firewall.save_ruleset(lan, wan)
-        firewall.apply_firewall_rules(lan, wan)
 
-    if _gateway_config["dhcp"].get("enabled", True):
-        dhcp_config = dict(_gateway_config["dhcp"])
-        dhcp_config["interface"] = _gateway_config["network"]["lan_interface"]
-        dhcp_config["address"] = _gateway_config["network"]["lan_address"].split("/")[0]
-        dhcp.configure_dhcp(dhcp_config)
+# ============================================================
+# NAT
+# ============================================================
 
-    dns.set_upstream_servers(
-        _gateway_config["dns"]["upstream_servers"]
+def initialize_nat():
+    """
+    Configure or disable NAT based on configuration.
+    """
+
+    enabled = _gateway_config[
+        "network"
+    ].get(
+        "nat_enabled",
+        False,
     )
 
-    if vpn is not None and _gateway_config["vpn"].get("enabled", False):
-        vpn.start()
+    if enabled:
+
+        app_logging.log_info(
+            "Enabling NAT."
+        )
+
+        nat.configure_nat()
+
+    else:
+
+        app_logging.log_info(
+            "NAT is disabled."
+        )
+
+
+# ============================================================
+# Firewall
+# ============================================================
+
+def initialize_firewall():
+    """
+    Configure the PiServer firewall.
+    """
+
+    enabled = _gateway_config[
+        "firewall"
+    ].get(
+        "enabled",
+        False,
+    )
+
+    if not enabled:
+
+        app_logging.log_info(
+            "Firewall is disabled."
+        )
+
+        return
+
+    lan = _gateway_config[
+        "network"
+    ][
+        "lan_interface"
+    ]
+
+    wan = _gateway_config[
+        "network"
+    ][
+        "wan_interface"
+    ]
+
+    app_logging.log_info(
+        "Initializing firewall."
+    )
+
+    firewall.save_ruleset(
+        lan,
+        wan,
+    )
+
+    firewall.apply_firewall_rules(
+        lan,
+        wan,
+    )
+
+
+# ============================================================
+# DHCP
+# ============================================================
+
+def initialize_dhcp():
+    """
+    Configure DHCP for the PiServer LAN.
+    """
+
+    enabled = _gateway_config[
+        "dhcp"
+    ].get(
+        "enabled",
+        False,
+    )
+
+    if not enabled:
+
+        app_logging.log_info(
+            "DHCP is disabled."
+        )
+
+        return
+
+    dhcp_config = dict(
+        _gateway_config[
+            "dhcp"
+        ]
+    )
+
+    dhcp_config[
+        "interface"
+    ] = _gateway_config[
+        "network"
+    ][
+        "lan_interface"
+    ]
+
+    dhcp_config[
+        "address"
+    ] = _gateway_config[
+        "network"
+    ][
+        "lan_address"
+    ].split(
+        "/"
+    )[0]
+
+    app_logging.log_info(
+        "Initializing DHCP."
+    )
+
+    dhcp.configure_dhcp(
+        dhcp_config
+    )
+
+
+# ============================================================
+# DNS
+# ============================================================
+
+def initialize_dns():
+    """
+    Configure PiServer DNS upstream servers.
+    """
+
+    dns_config = _gateway_config[
+        "dns"
+    ]
+
+    upstream_servers = dns_config.get(
+        "upstream_servers",
+        [],
+    )
+
+    app_logging.log_info(
+        "Configuring DNS upstream servers."
+    )
+
+    dns.set_upstream_servers(
+        upstream_servers
+    )
+
+
+# ============================================================
+# VPN
+# ============================================================
+
+def initialize_vpn():
+    """
+    Start the VPN when enabled.
+    """
+
+    if vpn is None:
+
+        app_logging.log_info(
+            "VPN module is unavailable."
+        )
+
+        return
+
+    enabled = _gateway_config[
+        "vpn"
+    ].get(
+        "enabled",
+        False,
+    )
+
+    if not enabled:
+
+        app_logging.log_info(
+            "VPN is disabled."
+        )
+
+        return
+
+    app_logging.log_info(
+        "Starting VPN."
+    )
+
+    vpn.start()
+
+
+# ============================================================
+# Gateway Initialization
+# ============================================================
+
+def initialize_gateway():
+    """
+    Initialize all PiServer gateway components.
+    """
+
+    global _running
+
+    app_logging.configure_logging()
+
+    app_logging.log_info(
+        "================================="
+    )
+
+    app_logging.log_info(
+        "PiServer gateway initialization"
+    )
+
+    app_logging.log_info(
+        "================================="
+    )
+
+    load_gateway_config()
+
+    initialize_network()
+    initialize_nat()
+    initialize_firewall()
+    initialize_dhcp()
+    initialize_dns()
+    initialize_vpn()
 
     _running = True
-    logging.log_info("Gateway initialization completed.")
+
+    app_logging.log_info(
+        "PiServer gateway initialization completed."
+    )
 
     return True
 
 
+# ============================================================
+# Gateway Status
+# ============================================================
+
 def get_gateway_status():
+    """
+    Return the current PiServer gateway status.
+    """
+
     return {
         "running": _running,
         "config": _gateway_config,
-        "health": monitoring.get_gateway_health(),
+        "health":
+            monitoring.get_gateway_health(),
     }
 
 
+# ============================================================
+# Shutdown
+# ============================================================
+
 def shutdown_gateway():
+    """
+    Stop gateway services that require shutdown.
+    """
+
     global _running
 
-    logging.log_info("Gateway shutdown started.")
+    app_logging.log_info(
+        "PiServer gateway shutdown started."
+    )
 
     if vpn is not None:
+
         try:
+
             vpn.stop()
+
         except AttributeError:
             pass
 
+        except Exception as exc:
+
+            app_logging.log_info(
+                f"VPN shutdown error: {exc}"
+            )
+
     _running = False
-    logging.log_info("Gateway shutdown completed.")
+
+    app_logging.log_info(
+        "PiServer gateway shutdown completed."
+    )
 
     return True
 
 
-def main():
-    initialize_gateway()
+# ============================================================
+# Web GUI
+# ============================================================
 
-    print("PiServer gateway running.")
-    print(monitoring.get_gateway_health())
+def start_gui():
+    """
+    Start the PiServer web GUI.
+
+    The GUI is intentionally started by main.py
+    so main.py remains the application entry point.
+    """
+
+    if app is None:
+
+        raise RuntimeError(
+            "PiServer GUI could not be imported."
+        )
+
+    app_logging.log_info(
+        "Starting PiServer web GUI."
+    )
+
+    app.run(
+        host="0.0.0.0",
+        port=80,
+        debug=False,
+        threaded=True,
+    )
+
+
+# ============================================================
+# Main
+# ============================================================
+
+def main():
+    """
+    Main PiServer application entry point.
+    """
+
+    try:
+
+        initialize_gateway()
+
+        print(
+            "PiServer gateway initialized."
+        )
+
+        print(
+            "PiServer GUI available on port 80."
+        )
+
+        start_gui()
+
+    except KeyboardInterrupt:
+
+        print(
+            "\nPiServer shutting down..."
+        )
+
+    except Exception as exc:
+
+        app_logging.log_info(
+            f"PiServer startup failed: {exc}"
+        )
+
+        raise
+
+    finally:
+
+        shutdown_gateway()
 
 
 if __name__ == "__main__":
     main()
+
