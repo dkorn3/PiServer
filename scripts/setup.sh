@@ -1,5 +1,3 @@
-#!/bin/bash
-
 set -e
 
 echo "================================="
@@ -85,11 +83,9 @@ cat > /etc/NetworkManager/conf.d/piserver.conf <<EOF
 unmanaged-devices=interface-name:wlan0
 EOF
 
-# Tell NetworkManager to stop managing wlan0 now.
-# eth0 remains managed.
-if command -v nmcli >/dev/null 2>&1; then
-    nmcli device set wlan0 managed no || true
-fi
+echo "NetworkManager configuration written."
+echo "wlan0 will be unmanaged after NetworkManager reload/reboot."
+echo "eth0 remains managed for WAN and SSH access."
 
 # Disable standalone wpa_supplicant so it does not compete with hostapd.
 echo
@@ -242,3 +238,9 @@ echo "pi-gateway:       $(systemctl is-active pi-gateway.service)"
 
 echo
 echo "PiServer setup completed."
+
+echo
+echo "NOTE:"
+echo "A reboot is recommended to fully apply the NetworkManager"
+echo "configuration for wlan0."
+
